@@ -7,16 +7,16 @@ import { getAuth } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-aut
 import { getFirestore } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 import { getStorage } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-storage.js";
 
-export const ADMIN_EMAIL = "SEU-EMAIL@gmail.com";   // o MESMO e-mail das regras de segurança
+export const ADMIN_EMAIL = "thiagocoelhodavos@gmail.com";   // o MESMO e-mail das regras de segurança
 export const DISCORD_CLIENT_ID = "";                // Client ID do app no Discord Developer Portal
 
 const firebaseConfig = {
-  apiKey: "COLE_AQUI",
-  authDomain: "COLE_AQUI.firebaseapp.com",
-  projectId: "COLE_AQUI",
-  storageBucket: "COLE_AQUI.firebasestorage.app",
-  messagingSenderId: "COLE_AQUI",
-  appId: "COLE_AQUI",
+  apiKey: "AIzaSyCYOq63F5LjnfrBzBuCzFG1oWcfB4o6sx0",
+  authDomain: "nx7-site.firebaseapp.com",
+  projectId: "nx7-site",
+  storageBucket: "nx7-site.firebasestorage.app",
+  messagingSenderId: "591912733196",
+  appId: "1:591912733196:web:07e3fa01a392d019b4bc29",
 };
 
 export const app = initializeApp(firebaseConfig);
