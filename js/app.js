@@ -2,9 +2,9 @@
 //  app.js — telas (SPA), modais, login, painel (cliente/admin) e perfil
 //  + AUTH WALL: o site só aparece depois que o Firebase confirma o login.
 // ============================================================
-import { auth, DISCORD_CLIENT_ID, ADMIN_EMAIL } from "./firebase-config.js";
-import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signInWithEmailAndPassword,
-  createUserWithEmailAndPassword, sendPasswordResetEmail, signOut, signInWithCustomToken,
+import { auth, ADMIN_EMAIL } from "./firebase-config.js";
+import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, OAuthProvider, signInWithEmailAndPassword,
+  createUserWithEmailAndPassword, sendPasswordResetEmail, signOut,
   updateProfile, deleteUser, reauthenticateWithPopup, reauthenticateWithCredential, EmailAuthProvider }
   from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import { PRODUTOS, criarTicket, ouvirTickets, ouvirMensagens, enviarMensagem, definirStatus,
@@ -12,7 +12,6 @@ import { PRODUTOS, criarTicket, ouvirTickets, ouvirMensagens, enviarMensagem, de
 
 const $ = (s) => document.querySelector(s);
 const el = (t, c, x) => { const e = document.createElement(t); if (c) e.className = c; if (x != null) e.textContent = x; return e; };
-const REDIRECT = location.origin + "/";
 
 /* ---------- garantia: carrega o CSS do Auth Wall mesmo se o <link> faltar no index.html ---------- */
 (() => {
@@ -28,7 +27,7 @@ const REDIRECT = location.origin + "/";
   document.head.append(l);
 })();
 let user = null, isAdmin = false, adminMode = false, unsubT = null, unsubM = null,
-    tickets = [], cur = null, buyKey = null, signup = false, dcPending = false;
+    tickets = [], cur = null, buyKey = null, signup = false;
 
 /* ---------- modais ---------- */
 const sync = () => document.body.classList.toggle("noscroll", !!document.querySelector(".mdl:not([hidden]),.tv:not([hidden])"));
@@ -69,17 +68,32 @@ function unlockSite() {
   scrollTo(0, 0);
 }
 // Rede de segurança: se o Firebase não responder, não deixa o loader eterno.
-const wallTimer = setTimeout(() => { if (root.classList.contains("loading") && !dcPending) lockSite("Conexão lenta. Tente entrar novamente."); }, 8000);
+const wallTimer = setTimeout(() => { if (root.classList.contains("loading")) lockSite("Conexão lenta. Tente entrar novamente."); }, 8000);
 
 /* ---------- login ---------- */
-const erro = (c) => ({ "auth/invalid-credential": "E-mail ou senha incorretos.", "auth/email-already-in-use": "Este e-mail já tem conta. Use Entrar.",
-  "auth/weak-password": "Senha muito curta (mínimo 6).", "auth/popup-closed-by-user": "", "auth/invalid-email": "E-mail inválido." }[c] ?? "Não foi possível entrar. Tente de novo.");
-const falha = (e) => { $("#loginErr").textContent = erro(e.code); };
-$("#gBtn").onclick = () => signInWithPopup(auth, new GoogleAuthProvider()).catch(falha);
+const erro = (c) => ({
+  "auth/invalid-credential": "E-mail ou senha incorretos.",
+  "auth/email-already-in-use": "Este e-mail já tem conta. Use Entrar.",
+  "auth/weak-password": "Senha muito curta (mínimo 6).",
+  "auth/invalid-email": "E-mail inválido.",
+  "auth/popup-closed-by-user": "",
+  "auth/cancelled-popup-request": "",
+  "auth/popup-blocked": "O navegador bloqueou a janela de login. Libere pop-ups para este site.",
+  "auth/unauthorized-domain": "Este domínio não está autorizado no Firebase (Authorized domains).",
+  "auth/operation-not-allowed": "Este método de login não está ativado no Firebase.",
+  "auth/account-exists-with-different-credential": "Já existe uma conta com este e-mail usando outro método de login.",
+}[c] ?? "Não foi possível entrar. Tente de novo.");
+const falha = (e) => { console.error(e); $("#loginErr").textContent = erro(e.code); };
+
+// Discord entra como provedor OpenID Connect do Firebase (Authentication > Sign-in method > OpenID Connect)
+const DISCORD_PROVIDER_ID = "oidc.discord"; // TEM que ser igual ao Provider ID mostrado no Firebase Console
+const entrarPopup = (provider) => signInWithPopup(auth, provider).catch(falha);
+
+$("#gBtn").onclick = () => entrarPopup(new GoogleAuthProvider());
 $("#dBtn").onclick = () => {
-  if (!DISCORD_CLIENT_ID) { $("#loginErr").textContent = "Login com Discord ainda não configurado."; return; }
-  const state = crypto.randomUUID(); sessionStorage.setItem("dc_state", state);
-  location.href = `https://discord.com/oauth2/authorize?client_id=${DISCORD_CLIENT_ID}&response_type=code&scope=identify&state=${state}&redirect_uri=${encodeURIComponent(REDIRECT)}`;
+  const provider = new OAuthProvider(DISCORD_PROVIDER_ID);
+  provider.addScope("identify");
+  entrarPopup(provider);
 };
 $("#emailForm").onsubmit = (e) => {
   e.preventDefault(); const em = $("#emEmail").value.trim(), pw = $("#emPass").value;
@@ -91,17 +105,6 @@ $("#emSwitch").onclick = (e) => { e.preventDefault(); signup = !signup;
 $("#emReset").onclick = (e) => { e.preventDefault(); const em = $("#emEmail").value.trim();
   if (!em) { $("#loginErr").textContent = "Digite seu e-mail acima."; return; }
   sendPasswordResetEmail(auth, em).then(() => ($("#loginErr").textContent = "Enviamos o link de redefinição.")).catch(falha); };
-// volta do Discord (?code=...&state=...) -> função do Netlify devolve um token do Firebase
-(() => {
-  const q = new URLSearchParams(location.search), code = q.get("code");
-  if (!code || q.get("state") !== sessionStorage.getItem("dc_state")) return;
-  dcPending = true; // mantém o loader até o login do Discord terminar (evita piscar a tela de login)
-  sessionStorage.removeItem("dc_state"); history.replaceState(null, "", location.pathname);
-  fetch("/.netlify/functions/discord-auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code }) })
-    .then((r) => r.json()).then((j) => { if (!j.token) throw 0; return signInWithCustomToken(auth, j.token); })
-    .catch(() => { dcPending = false; if (!user) lockSite("Falha no login com Discord."); });
-})();
-
 /* ---------- avatar padrão ---------- */
 const DEFAULT_AVATAR = "data:image/svg+xml;utf8," + encodeURIComponent(
   `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='#6d28d9'/><stop offset='1' stop-color='#c084fc'/></linearGradient><radialGradient id='h' cx='.3' cy='.2' r='.9'><stop offset='0' stop-color='#fff' stop-opacity='.3'/><stop offset='1' stop-color='#fff' stop-opacity='0'/></radialGradient></defs><rect width='96' height='96' fill='url(#g)'/><rect width='96' height='96' fill='url(#h)'/><circle cx='48' cy='37' r='15' fill='#fff' fill-opacity='.93'/><path d='M18 88c2-19 15-29 30-29s28 10 30 29z' fill='#fff' fill-opacity='.93'/></svg>`);
@@ -138,8 +141,8 @@ onAuthStateChanged(auth, (u) => {
   clearTimeout(wallTimer);
   user = u; isAdmin = !!u && u.email === ADMIN_EMAIL && u.emailVerified; // só a interface; as regras do Firebase é que protegem
   renderNav();
-  if (u) { dcPending = false; unlockSite(); }
-  else if (!dcPending) lockSite(); // sem sessão (1º acesso, logout, conta excluída): volta para o login obrigatório
+  if (u) unlockSite();
+  else lockSite(); // sem sessão (1º acesso, logout, conta excluída): volta para o login obrigatório
 });
 $("#tvOut").onclick = () => signOut(auth);
 
@@ -279,11 +282,12 @@ $("#dlConfirm").oninput = () => { $("#dlGo").disabled = $("#dlConfirm").value.tr
 async function reautenticar() { // o Firebase exige login recente para apagar a conta
   const p = provs();
   if (p.includes("google.com")) await reauthenticateWithPopup(user, new GoogleAuthProvider());
+  else if (p.includes(DISCORD_PROVIDER_ID)) await reauthenticateWithPopup(user, new OAuthProvider(DISCORD_PROVIDER_ID));
   else if (p.includes("password")) {
     const pw = $("#dlPass").value;
     if (!pw) throw Object.assign(new Error("Digite sua senha para confirmar."), { code: "x" });
     await reauthenticateWithCredential(user, EmailAuthProvider.credential(user.email, pw));
-  } // Discord (token customizado): sem reautenticação; se o Firebase pedir, o aviso abaixo orienta
+  }
 }
 $("#dlGo").onclick = async () => {
   const b = $("#dlGo"), err = $("#dlErr"); err.textContent = ""; b.disabled = true; b.textContent = "Excluindo...";
