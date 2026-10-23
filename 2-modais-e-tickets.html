@@ -1,0 +1,39 @@
+<!-- COLE logo antes do </body> (antes dos <script>) -->
+<div class="mdl" id="loginModal" hidden role="dialog" aria-modal="true"><div class="mdl-box">
+  <button class="mdl-x" data-close type="button" aria-label="Fechar">&times;</button>
+  <h3 class="o">Entrar / Minha Conta</h3><p class="mdl-sub">Entre para comprar e acompanhar seus tickets.</p>
+  <button class="sbtn" id="gBtn" type="button">Entrar com Google</button>
+  <button class="sbtn dc" id="dBtn" type="button">Entrar com Discord</button>
+  <div class="or"><span>ou com e-mail</span></div>
+  <form id="emailForm"><input type="email" id="emEmail" placeholder="seu@email.com" required autocomplete="email">
+    <input type="password" id="emPass" placeholder="Senha (mínimo 6 caracteres)" required minlength="6" autocomplete="current-password">
+    <button class="btn" type="submit" id="emSubmit">Entrar</button></form>
+  <p class="mdl-sw"><a href="#" id="emSwitch">Não tem conta? Cadastre-se</a> · <a href="#" id="emReset">Esqueci a senha</a></p>
+  <p class="mdl-err" id="loginErr"></p>
+</div></div>
+
+<div class="mdl" id="buyModal" hidden role="dialog" aria-modal="true"><div class="mdl-box">
+  <button class="mdl-x" data-close type="button" aria-label="Fechar">&times;</button>
+  <h3 class="o">Confirmar pedido</h3>
+  <div class="buy-sum"><b id="buyName"></b><span id="buyPrice"></span></div>
+  <p class="mdl-sub">Vamos abrir um <b>ticket privado</b>. Lá você conversa com o vendedor, envia arquivos e recebe o seu acesso.</p>
+  <button class="btn gd" id="buyOk" type="button">Criar ticket de pedido</button>
+</div></div>
+
+<section class="tv" id="ticketsView" hidden>
+  <div class="tv-top"><button class="gb" id="tvBack" type="button">&larr; Voltar ao site</button><b class="o" id="tvTitle">Meus Tickets</b>
+    <span class="tv-me" id="tvMe"></span><button class="gb" id="tvOut" type="button">Sair</button></div>
+  <div class="tv-body">
+    <aside class="tv-list" id="tvList"></aside>
+    <div class="tv-chat">
+      <div class="chat-h"><button class="gb" id="chBack" type="button">&larr;</button><b id="chTitle">Selecione um ticket</b><span id="chStatus" class="stt"></span>
+        <span id="admTools" hidden><button class="gb" id="stPend" type="button">Pendente</button><button class="gb ok" id="stDone" type="button">Concluído</button></span></div>
+      <div class="chat-box" id="chatBox"></div>
+      <form class="chat-f" id="chatForm" hidden><label class="gb" for="chFile">Anexar</label>
+        <input type="file" id="chFile" hidden accept=".zip,.rar,.7z,.pdf,.txt,image/*"><span id="chFn"></span>
+        <input id="chText" placeholder="Escreva uma mensagem ou cole um link..." autocomplete="off" maxlength="2000"><button class="btn" type="submit" id="chSend">Enviar</button></form>
+    </div>
+  </div>
+</section>
+
+<script type="module" src="js/app.js"></script>

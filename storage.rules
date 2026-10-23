@@ -1,0 +1,17 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() { return request.auth != null; }
+    function isAdmin() { return signedIn() && request.auth.token.email == 'SEU-EMAIL@gmail.com' && request.auth.token.email_verified == true; }
+    function ownsTicket(ticketId) {
+      return signedIn() && firestore.get(/databases/(default)/documents/tickets/$(ticketId)).data.uid == request.auth.uid;
+    }
+    match /tickets/{ticketId}/{fileName} {
+      allow read: if isAdmin() || ownsTicket(ticketId);
+      allow create: if (isAdmin() || ownsTicket(ticketId))
+        && request.resource.size < 100 * 1024 * 1024
+        && fileName.matches('(?i).*\\.(zip|rar|7z|pdf|txt|png|jpg|jpeg|gif|webp)');
+      allow update, delete: if isAdmin();
+    }
+  }
+}

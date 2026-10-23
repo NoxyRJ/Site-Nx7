@@ -1,0 +1,31 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    // TROQUE pelo seu e-mail. Exige e-mail VERIFICADO (evita alguém criar conta com o seu e-mail).
+    function isAdmin() { return signedIn() && request.auth.token.email == 'SEU-EMAIL@gmail.com' && request.auth.token.email_verified == true; }
+
+    match /tickets/{ticketId} {
+      allow read: if isAdmin() || (signedIn() && resource.data.uid == request.auth.uid);
+      allow create: if signedIn() && request.resource.data.uid == request.auth.uid
+        && request.resource.data.status == 'pendente'
+        && request.resource.data.product in ['orbs', 'msg', 'combo']
+        && request.resource.data.createdAt == request.time;
+      // admin muda status; cliente só pode atualizar "updatedAt" (para o ticket subir na lista)
+      allow update: if isAdmin() || (signedIn() && resource.data.uid == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['updatedAt']));
+      allow delete: if false;
+
+      match /messages/{msgId} {
+        function ticketUid() { return get(/databases/$(database)/documents/tickets/$(ticketId)).data.uid; }
+        allow read: if isAdmin() || (signedIn() && ticketUid() == request.auth.uid);
+        allow create: if signedIn() && (isAdmin() || ticketUid() == request.auth.uid)
+          && request.resource.data.uid == request.auth.uid
+          && request.resource.data.isAdmin == isAdmin()
+          && request.resource.data.text is string && request.resource.data.text.size() <= 2000
+          && request.resource.data.createdAt == request.time;
+        allow update, delete: if false;
+      }
+    }
+  }
+}
