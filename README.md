@@ -8,7 +8,7 @@
 **Eleve sua experiência no Discord ao próximo nível.**  
 Automação, limpeza e gerenciamento de contas com uma interface premium, sistema de tickets e pagamentos.
 
-[![Netlify Status](https://api.netlify.com/api/v1/badges/SEU-SITE-ID/deploy-status)](https://app.netlify.com/sites/nx7painel/deploys)
+[![Netlify Status](https://api.netlify.com/api/v1/badges/e821a677-24f8-43b0-888c-8cde27eea6cd/deploy-status)](https://app.netlify.com/sites/nx7painel/deploys)
 [![Firebase](https://img.shields.io/badge/Firebase-039BE5?style=for-the-badge&logo=Firebase&logoColor=white)](https://firebase.google.com/)
 [![HTML5](https://img.shields.io/badge/HTML5-E34F26?style=for-the-badge&logo=html5&logoColor=white)]()
 [![CSS3](https://img.shields.io/badge/CSS3-1572B6?style=for-the-badge&logo=css3&logoColor=white)]()
@@ -86,4 +86,4 @@ O site foi arquitetado para rodar no Netlify. Para o funcionamento completo (inc
 ⚠️ Aviso Legal
 Atenção: O uso de scripts em contas de usuário (Self-Bots) vai contra os Termos de Serviço do Discord e pode resultar no banimento da conta. Este projeto é vendido e distribuído para fins educacionais e de automação, e o uso é de inteira responsabilidade do comprador.
 
-<div align="center"> <b>Desenvolvido com 💜 por <a href="https://github.com/NoxyRJ">Noxy7</a></b><br> <i>Entre em contato pelo nosso Discord para adquirir os scripts.</i> </div> ```
+<div align="center"> <b>Desenvolvido com 💜 por <a href="https://github.com/NoxyRJ">Noxy7</a></b><br> <i>Entre em contato pelo nosso Discord para adquirir os scripts.</i> </div>
