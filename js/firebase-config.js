@@ -8,7 +8,6 @@ import { getFirestore } from "https://www.gstatic.com/firebasejs/10.14.1/firebas
 import { getStorage } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-storage.js";
 
 export const ADMIN_EMAIL = "thiagocoelhodavos@gmail.com";   // o MESMO e-mail das regras de segurança
-export const DISCORD_CLIENT_ID = "1563033920201556042";    // Client ID do app no Discord Developer Portal
 
 const firebaseConfig = {
   apiKey: "AIzaSyCYOq63F5LjnfrBzBuCzFG1oWcfB4o6sx0",
