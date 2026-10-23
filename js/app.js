@@ -1,11 +1,13 @@
 // ============================================================
-//  app.js — telas (SPA), modais, login e painel (cliente/admin)
+//  app.js — telas (SPA), modais, login, painel (cliente/admin) e perfil
 // ============================================================
 import { auth, DISCORD_CLIENT_ID, ADMIN_EMAIL } from "./firebase-config.js";
 import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signInWithEmailAndPassword,
-  createUserWithEmailAndPassword, sendPasswordResetEmail, signOut, signInWithCustomToken }
+  createUserWithEmailAndPassword, sendPasswordResetEmail, signOut, signInWithCustomToken,
+  updateProfile, deleteUser, reauthenticateWithPopup, reauthenticateWithCredential, EmailAuthProvider }
   from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
-import { PRODUTOS, criarTicket, ouvirTickets, ouvirMensagens, enviarMensagem, definirStatus } from "./db.js";
+import { PRODUTOS, criarTicket, ouvirTickets, ouvirMensagens, enviarMensagem, definirStatus,
+  enviarAvatar, excluirDadosDoUsuario } from "./db.js";
 
 const $ = (s) => document.querySelector(s);
 const el = (t, c, x) => { const e = document.createElement(t); if (c) e.className = c; if (x != null) e.textContent = x; return e; };
@@ -54,23 +56,43 @@ $("#emReset").onclick = (e) => { e.preventDefault(); const em = $("#emEmail").va
     .catch(() => { openLogin(); $("#loginErr").textContent = "Falha no login com Discord."; });
 })();
 
-/* ---------- navbar + estado de login ---------- */
+/* ---------- avatar padrão ---------- */
+const DEFAULT_AVATAR = "data:image/svg+xml;utf8," + encodeURIComponent(
+  `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='#6d28d9'/><stop offset='1' stop-color='#c084fc'/></linearGradient><radialGradient id='h' cx='.3' cy='.2' r='.9'><stop offset='0' stop-color='#fff' stop-opacity='.3'/><stop offset='1' stop-color='#fff' stop-opacity='0'/></radialGradient></defs><rect width='96' height='96' fill='url(#g)'/><rect width='96' height='96' fill='url(#h)'/><circle cx='48' cy='37' r='15' fill='#fff' fill-opacity='.93'/><path d='M18 88c2-19 15-29 30-29s28 10 30 29z' fill='#fff' fill-opacity='.93'/></svg>`);
+const avatarOf = (u) => (u?.photoURL && /^https:\/\//.test(u.photoURL) ? u.photoURL : DEFAULT_AVATAR);
+const setImg = (img, src) => { img.onerror = () => { img.onerror = null; img.src = DEFAULT_AVATAR; }; img.referrerPolicy = "no-referrer"; img.src = src; };
+
+/* ---------- navbar: avatar + menu ---------- */
+const menu = $("#accMenu");
+const closeMenu = () => { menu.hidden = true; $("#accBtn").setAttribute("aria-expanded", "false"); };
+const toggleMenu = () => {
+  const show = menu.hidden; menu.hidden = !show; $("#accBtn").setAttribute("aria-expanded", String(show));
+  if (show) document.querySelector("nav").classList.remove("open"); // fecha o menu hambúrguer
+};
 function renderNav() {
-  const b = $("#accBtn"); b.replaceChildren();
-  if (user) {
-    if (user.photoURL) { const i = el("img"); i.src = user.photoURL; i.alt = ""; i.referrerPolicy = "no-referrer"; b.append(i); }
-    b.append(el("span", "", "Meu Painel"), el("small", "un", (user.displayName || user.email || "").split(" ")[0]));
-  } else b.textContent = "Entrar / Minha Conta";
+  const src = avatarOf(user);
+  setImg($("#accImg"), src); setImg($("#accMenuImg"), src);
+  $("#accName").textContent = user ? user.displayName || (user.email || "Cliente").split("@")[0] : "";
+  $("#accMail").textContent = user?.email || "";
   $("#adminBtn").hidden = !isAdmin;
+  if (!user) closeMenu();
 }
+$("#accBtn").onclick = (e) => { e.stopPropagation(); user ? toggleMenu() : openLogin(); };
+document.addEventListener("click", (e) => { if (!e.target.closest("#acc")) closeMenu(); });
+addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenu(); });
+$("#mb")?.addEventListener("click", closeMenu);
+$("#miProfile").onclick = () => { closeMenu(); openProfile(); };
+$("#miTickets").onclick = () => { closeMenu(); openTickets(false); };
+$("#adminBtn").onclick = () => { closeMenu(); openTickets(true); };
+$("#miOut").onclick = () => { closeMenu(); signOut(auth); };
+renderNav();
+
 onAuthStateChanged(auth, (u) => {
   user = u; isAdmin = !!u && u.email === ADMIN_EMAIL && u.emailVerified; // só a interface; as regras do Firebase é que protegem
   renderNav();
   if (u) { close("#loginModal"); if (pendingBuy) { const k = pendingBuy; pendingBuy = null; askBuy(k); } }
   else closeTickets();
 });
-$("#accBtn").onclick = () => (user ? openTickets(false) : openLogin());
-$("#adminBtn").onclick = () => openTickets(true);
 $("#tvOut").onclick = () => signOut(auth);
 
 /* ---------- comprar -> modal de confirmação -> ticket ---------- */
@@ -156,3 +178,75 @@ $("#chatForm").onsubmit = async (e) => {
 };
 $("#stPend").onclick = () => cur && definirStatus(cur.id, "pendente").catch((e) => alert(e.message));
 $("#stDone").onclick = () => cur && definirStatus(cur.id, "concluido").catch((e) => alert(e.message));
+
+/* ---------- Meu Perfil ---------- */
+let newPhoto = null, removePhoto = false, previewUrl = null;
+function openProfile() {
+  newPhoto = null; removePhoto = false; $("#pfErr").textContent = ""; $("#pfFile").value = "";
+  $("#pfName").value = user.displayName || ""; $("#pfMail").value = user.email || "—";
+  $("#pfDz").hidden = isAdmin; // a conta do dono não pode ser apagada por aqui
+  setImg($("#pfImg"), avatarOf(user)); open("#profileModal");
+}
+// recorta no centro e reduz para 256x256 (foto leve e padronizada)
+async function cropAvatar(file, size = 256) {
+  const bmp = await createImageBitmap(file), s = Math.min(bmp.width, bmp.height), c = document.createElement("canvas");
+  c.width = c.height = size;
+  c.getContext("2d").drawImage(bmp, (bmp.width - s) / 2, (bmp.height - s) / 2, s, s, 0, 0, size, size);
+  return new Promise((ok) => c.toBlob(ok, "image/jpeg", 0.88));
+}
+$("#pfFile").onchange = (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  if (!/^image\/(png|jpe?g|webp|gif)$/.test(f.type)) { $("#pfErr").textContent = "Escolha uma imagem PNG, JPG, WEBP ou GIF."; e.target.value = ""; return; }
+  if (f.size > 10 * 1024 * 1024) { $("#pfErr").textContent = "Imagem muito grande (máx. 10 MB)."; e.target.value = ""; return; }
+  $("#pfErr").textContent = ""; newPhoto = f; removePhoto = false;
+  if (previewUrl) URL.revokeObjectURL(previewUrl);
+  previewUrl = URL.createObjectURL(f); $("#pfImg").src = previewUrl;
+};
+$("#pfRemove").onclick = () => { newPhoto = null; removePhoto = true; $("#pfFile").value = ""; $("#pfImg").src = DEFAULT_AVATAR; };
+$("#pfForm").onsubmit = async (e) => {
+  e.preventDefault(); const b = $("#pfSave"), err = $("#pfErr"); err.textContent = ""; b.disabled = true; b.textContent = "Salvando...";
+  try {
+    const name = $("#pfName").value.trim();
+    if (name.length < 2) throw new Error("Digite um nome com pelo menos 2 caracteres.");
+    const patch = { displayName: name };
+    if (newPhoto) patch.photoURL = await enviarAvatar(user.uid, await cropAvatar(newPhoto));
+    else if (removePhoto) patch.photoURL = null;
+    await updateProfile(user, patch);
+    renderNav(); close("#profileModal");
+  } catch (x) { err.textContent = x.message || "Não foi possível salvar."; }
+  b.disabled = false; b.textContent = "Salvar alterações";
+};
+
+/* ---------- Excluir conta (LGPD) ---------- */
+const provs = () => user.providerData.map((p) => p.providerId);
+$("#pfDelete").onclick = () => {
+  close("#profileModal");
+  $("#dlStep1").hidden = false; $("#dlStep2").hidden = true; $("#dlConfirm").value = ""; $("#dlPass").value = "";
+  $("#dlErr").textContent = ""; $("#dlGo").disabled = true; $("#dlPassWrap").hidden = !provs().includes("password");
+  open("#deleteModal");
+};
+$("#dlNext").onclick = () => { $("#dlStep1").hidden = true; $("#dlStep2").hidden = false; $("#dlConfirm").focus(); };
+$("#dlConfirm").oninput = () => { $("#dlGo").disabled = $("#dlConfirm").value.trim().toUpperCase() !== "EXCLUIR"; };
+async function reautenticar() { // o Firebase exige login recente para apagar a conta
+  const p = provs();
+  if (p.includes("google.com")) await reauthenticateWithPopup(user, new GoogleAuthProvider());
+  else if (p.includes("password")) {
+    const pw = $("#dlPass").value;
+    if (!pw) throw Object.assign(new Error("Digite sua senha para confirmar."), { code: "x" });
+    await reauthenticateWithCredential(user, EmailAuthProvider.credential(user.email, pw));
+  } // Discord (token customizado): sem reautenticação; se o Firebase pedir, o aviso abaixo orienta
+}
+$("#dlGo").onclick = async () => {
+  const b = $("#dlGo"), err = $("#dlErr"); err.textContent = ""; b.disabled = true; b.textContent = "Excluindo...";
+  try {
+    await reautenticar();
+    await excluirDadosDoUsuario(user.uid);
+    await deleteUser(user);
+    close("#deleteModal"); alert("Sua conta e seus dados foram excluídos.");
+  } catch (x) {
+    err.textContent = ({ "auth/requires-recent-login": "Por segurança, saia, entre de novo e tente excluir logo em seguida.",
+      "auth/invalid-credential": "Senha incorreta.", "auth/wrong-password": "Senha incorreta.", "auth/popup-closed-by-user": "Confirmação cancelada." }[x.code])
+      ?? x.message ?? "Não foi possível excluir. Tente de novo.";
+    b.disabled = false; b.textContent = "Excluir definitivamente";
+  }
+};
