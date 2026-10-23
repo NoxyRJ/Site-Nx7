@@ -72,3 +72,18 @@ O foco principal é entregar uma experiência de compra **rápida, segura e prem
 └── 📁 netlify/
     └── 📁 functions/
         └── 📄 discord-auth.js # Função serverless para login via Discord
+```
+
+☁️ Deploy e Configuração
+O site foi arquitetado para rodar no Netlify. Para o funcionamento completo (incluindo o login do Discord), você precisará configurar:
+
+1 - Firebase: Ativar Authentication (Google, Email/Senha, Discord), Firestore e Storage.
+
+2 - Netlify: Conectar o repositório do GitHub.
+
+3 - Discord Developer Portal: Criar um App, pegar o Client ID e Client Secret para colocar no Firebase e nas variáveis de ambiente do Netlify.
+
+⚠️ Aviso Legal
+Atenção: O uso de scripts em contas de usuário (Self-Bots) vai contra os Termos de Serviço do Discord e pode resultar no banimento da conta. Este projeto é vendido e distribuído para fins educacionais e de automação, e o uso é de inteira responsabilidade do comprador.
+
+<div align="center"> <b>Desenvolvido com 💜 por <a href="https://github.com/NoxyRJ">Noxy7</a></b><br> <i>Entre em contato pelo nosso Discord para adquirir os scripts.</i> </div> ```
