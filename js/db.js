@@ -2,9 +2,9 @@
 //  db.js — Firestore (tickets + chat em tempo real) e Storage (arquivos)
 // ============================================================
 import { db, storage } from "./firebase-config.js";
-import { collection, addDoc, doc, updateDoc, onSnapshot, query, where, orderBy, serverTimestamp }
+import { collection, addDoc, doc, updateDoc, onSnapshot, query, where, orderBy, serverTimestamp, getDocs, deleteDoc }
   from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
-import { ref, uploadBytesResumable, getDownloadURL }
+import { ref, uploadBytesResumable, uploadBytes, getDownloadURL, listAll, deleteObject }
   from "https://www.gstatic.com/firebasejs/10.14.1/firebase-storage.js";
 
 export const PRODUTOS = {
@@ -59,3 +59,29 @@ export async function enviarMensagem(ticketId, user, { text = "", file = null, o
 
 export const definirStatus = (ticketId, status) =>
   updateDoc(doc(db, "tickets", ticketId), { status, updatedAt: serverTimestamp() }); // "pendente" | "concluido"
+
+// ---------- Fase 2: perfil e exclusão de conta ----------
+
+// foto de perfil: guarda em avatars/{uid}/ e apaga as fotos antigas
+export async function enviarAvatar(uid, blob) {
+  const nome = `avatar-${Date.now()}.jpg`, r = ref(storage, `avatars/${uid}/${nome}`);
+  await uploadBytes(r, blob, { contentType: "image/jpeg" });
+  const url = await getDownloadURL(r);
+  try {
+    (await listAll(ref(storage, `avatars/${uid}`))).items
+      .filter((i) => i.name !== nome).forEach((i) => deleteObject(i).catch(() => {}));
+  } catch {}
+  return url;
+}
+
+// exclusão de conta (LGPD): mensagens -> arquivos -> ticket -> avatar
+export async function excluirDadosDoUsuario(uid) {
+  const ts = await getDocs(query(collection(db, "tickets"), where("uid", "==", uid)));
+  for (const t of ts.docs) {
+    const ms = await getDocs(collection(db, "tickets", t.id, "messages"));
+    await Promise.all(ms.docs.map((m) => deleteDoc(m.ref)));
+    try { await Promise.all((await listAll(ref(storage, `tickets/${t.id}`))).items.map(deleteObject)); } catch {}
+    await deleteDoc(t.ref);
+  }
+  try { await Promise.all((await listAll(ref(storage, `avatars/${uid}`))).items.map(deleteObject)); } catch {}
+}
