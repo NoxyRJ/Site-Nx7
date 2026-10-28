@@ -3,10 +3,9 @@
 //  + AUTH WALL: o site só aparece depois que o Firebase confirma o login.
 //  Fase 3: botão Concluído corrigido + novo design do chat.
 //  Fase 4: anexos com pré-visualização, barra de progresso e cancelamento.
-//  Correções: COOP (signInWithRedirect) + Optional Chaining (?.) em todos os elementos.
 // ============================================================
 import { auth, ADMIN_EMAIL } from "./firebase-config.js";
-import { onAuthStateChanged, signInWithRedirect, getRedirectResult, GoogleAuthProvider, OAuthProvider, signInWithEmailAndPassword,
+import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, OAuthProvider, signInWithEmailAndPassword,
   createUserWithEmailAndPassword, sendPasswordResetEmail, signOut,
   updateProfile, updatePassword, deleteUser, reauthenticateWithPopup, reauthenticateWithCredential, EmailAuthProvider,
   linkWithPopup, unlink }
@@ -28,25 +27,26 @@ const fmtBytes = (n) => n < 1024 ? `${n} B` : n < 1048576 ? `${Math.round(n / 10
 (() => {
   const r = document.documentElement;
   r.classList.add("gate", "loading");
-  if (document.querySelector('link[href*="auth-gate.css"], style#auth-gate-css')) return;
-  r.style.visibility = "hidden";
+  if (document.querySelector('link[href*="auth-gate.css"], style#auth-gate-css')) return; // já está no <head>: nada a fazer
+  r.style.visibility = "hidden"; // evita mostrar o site "pelado" até o CSS chegar
   const l = document.createElement("link"); l.rel = "stylesheet";
-  l.href = new URL("../css/auth-gate.css", import.meta.url).href;
+  l.href = new URL("../css/auth-gate.css", import.meta.url).href; // css/ fica ao lado de js/
   const show = () => { r.style.visibility = ""; };
   l.onload = show;
   l.onerror = () => { show(); console.error("auth-gate.css NÃO encontrado em: " + l.href); };
   document.head.append(l);
 })();
-
 let user = null, isAdmin = false, adminMode = false, unsubT = null, unsubM = null,
     tickets = [], cur = null, buyKey = null, signup = false,
-    newPhoto = null, removePhoto = false, previewUrl = null,
-    busca = "", filtro = "todos",
-    msgsCache = [], sigPerfis = "";
-
+    newPhoto = null, removePhoto = false, previewUrl = null, // estado do "Meu Perfil"
+    busca = "", filtro = "todos", // estado da busca/filtro do painel de tickets
+    msgsCache = [], sigPerfis = ""; // últimas mensagens + assinatura dos perfis (para redesenhar quando alguém troca nome/foto)
+// equipe: isAdmin = DONO (e-mail do firebase-config). papel = "dono" | "vendedor" | "suporte" | null
 let papel = null, isStaff = false, meComprador = false, compChecado = false, unsubComp = null, unsubPapel = null, unsubEq = null, equipe = [];
-let unsubAud = null, auditoria = [], filtroAud = "todos";
+let unsubAud = null, auditoria = [], filtroAud = "todos"; // console do dono: log de auditoria
 
+/* ---------- notificação de resposta nova no ticket (badge + som leve) ---------- */
+// "visto por último" fica só no navegador (localStorage), por conta: nunca toca no Firestore nem nas regras.
 let unreadIds = new Set(), primeiraCargaNtf = true, audioCtx = null;
 const seenKey = () => "nx7_seen_" + (user?.uid || "");
 function lerVistos() { try { return JSON.parse(localStorage.getItem(seenKey())) || {}; } catch { return {}; } }
@@ -55,7 +55,7 @@ function marcarVisto(ticketId, quando) {
   try { localStorage.setItem(seenKey(), JSON.stringify(m)); } catch {}
   if (unreadIds.has(ticketId)) { unreadIds.delete(ticketId); atualizarBadgesNtf(); }
 }
-function tocarNtf() {
+function tocarNtf() { // beep curto sintetizado: sem depender de arquivo de áudio
   try {
     audioCtx ??= new (window.AudioContext || window.webkitAudioContext)();
     const t0 = audioCtx.currentTime, o = audioCtx.createOscillator(), g = audioCtx.createGain();
@@ -64,11 +64,12 @@ function tocarNtf() {
     o.connect(g); g.connect(audioCtx.destination); o.start(t0); o.stop(t0 + 0.27);
   } catch {}
 }
+// chamado sempre que a lista de tickets do usuário chega (logado) — calcula quem tem mensagem nova não vista
 function processarNtf(lista) {
   const vistos = lerVistos(), novos = new Set();
   lista.forEach((t) => {
-    const ms_ = t.updatedAt?.toMillis?.() ?? 0, aberto = cur?.id === t.id && !$("#ticketsView")?.hidden;
-    if (aberto) { marcarVisto(t.id, ms_); return; }
+    const ms_ = t.updatedAt?.toMillis?.() ?? 0, aberto = cur?.id === t.id && !$("#ticketsView").hidden;
+    if (aberto) { marcarVisto(t.id, ms_); return; } // está vendo agora: já conta como visto
     if (ms_ > (vistos[t.id] || 0)) novos.add(t.id);
   });
   const soouNovo = !primeiraCargaNtf && [...novos].some((id) => !unreadIds.has(id));
@@ -78,14 +79,13 @@ function processarNtf(lista) {
 }
 function atualizarBadgesNtf() {
   const tem = unreadIds.size > 0;
-  if ($("#miTicketsDot")) $("#miTicketsDot").hidden = !tem;
-  if ($("#accDot")) $("#accDot").hidden = !tem;
-  renderList();
+  $("#miTicketsDot").hidden = !tem; $("#accDot").hidden = !tem;
+  renderList(); // redesenha os pontinhos nos itens da lista, se o painel estiver aberto
 }
-const PERMS = {
-  status:   ["dono", "vendedor"],
-  reembolso: ["dono"],
-  equipe:   ["dono"],
+const PERMS = { // quem pode o quê (mude aqui se quiser)
+  status:   ["dono", "vendedor"],   // marcar Pendente / Concluído
+  reembolso: ["dono"],              // registrar reembolso
+  equipe:   ["dono"],               // abrir o painel da equipe
 };
 const can = (acao) => !!papel && (PERMS[acao] || []).includes(papel);
 const LABEL_PAPEL = { dono: "DONO", vendedor: "VENDEDOR", suporte: "SUPORTE" };
@@ -93,14 +93,15 @@ const tagEl = (cls, txt) => el("span", cls === "dono" ? "dono" : "rtag " + cls, 
 const badgesPapel = () => [
   ...(papel === "dono" ? [tagEl("dono", "DONO")] : papel ? [tagEl("r-" + papel, LABEL_PAPEL[papel])] : []),
   ...(meComprador ? [tagEl("comprador", "COMPRADOR")] : []),
-  ...(!papel && compChecado && !meComprador ? [tagEl("visitante", "FUTURO COMPRADOR")] : []),
+  ...(!papel && compChecado && !meComprador ? [tagEl("visitante", "FUTURO COMPRADOR")] : []), // quem ainda não comprou
 ];
-const up = { file: null, task: null, busy: false, thumb: null };
+const up = { file: null, task: null, busy: false, thumb: null }; // estado do anexo no chat
 
 /* ---------- modais ---------- */
 const sync = () => document.body.classList.toggle("noscroll", !!document.querySelector(".mdl:not([hidden]),.tv:not([hidden])"));
-const open = (id) => { if ($(id)) { $(id).hidden = false; sync(); } };
-const close = (id) => { if ($(id)) { $(id).hidden = true; sync(); } };
+const open = (id) => { $(id).hidden = false; sync(); };
+const close = (id) => { $(id).hidden = true; sync(); };
+// o modal de login é obrigatório enquanto não houver sessão: não fecha por X, fundo ou Esc
 const locked = (m) => m.id === "loginModal" && !user;
 document.addEventListener("click", (e) => {
   const m = e.target.closest?.(".mdl");
@@ -110,15 +111,16 @@ addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   const abertos = document.querySelectorAll(".mdl:not([hidden])");
   if (abertos.length) { abertos.forEach((m) => { if (!locked(m)) m.hidden = true; }); sync(); return; }
-  if (!$("#ticketsView")?.hidden) { closeTickets(); return; }
-  if (!$("#supportView")?.hidden) { Suporte.fechar(); return; }
+  if (!$("#ticketsView").hidden) { closeTickets(); return; } // painel de tickets/atendimento: Esc fecha e devolve o foco
+  if (!$("#supportView").hidden) { Suporte.fechar(); return; } // central de suporte
 });
-const openLogin = () => { if ($("#loginErr")) $("#loginErr").textContent = ""; open("#loginModal"); };
+const openLogin = () => { $("#loginErr").textContent = ""; open("#loginModal"); };
 
-/* ---------- acessibilidade ---------- */
+/* ---------- acessibilidade: navegação só por teclado no painel de tickets e nos menus ---------- */
+// elementos realmente visíveis e focáveis dentro de um container
 const focaveis = (c) => Array.from(c.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]):not([type="hidden"]),textarea:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])')).filter((e) => e.offsetParent !== null);
+// prende o Tab dentro do container enquanto `ativo()` for verdadeiro (não deixa o foco "vazar" para o site por trás)
 function prenderFoco(container, ativo) {
-  if (!container) return;
   container.addEventListener("keydown", (e) => {
     if (e.key !== "Tab" || !ativo()) return;
     const f = focaveis(container); if (!f.length) return;
@@ -127,8 +129,8 @@ function prenderFoco(container, ativo) {
     else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
   });
 }
+// setas/Home/End para navegar entre os itens de um menu (role="menuitem"); Tab fecha o menu
 function navMenuTeclado(menuEl, fechar) {
-  if (!menuEl) return;
   menuEl.addEventListener("keydown", (e) => {
     const its = Array.from(menuEl.querySelectorAll('[role="menuitem"]:not([hidden])')); if (!its.length) return;
     const i = its.indexOf(document.activeElement);
@@ -139,32 +141,34 @@ function navMenuTeclado(menuEl, fechar) {
     else if (e.key === "Tab") fechar();
   });
 }
-let focoAntesPainel = null;
-prenderFoco($("#ticketsView"), () => !$("#ticketsView")?.hidden && !document.querySelector(".mdl:not([hidden])"));
+let focoAntesPainel = null; // elemento focado antes de abrir o painel de tickets, para devolver o foco ao fechar
+prenderFoco($("#ticketsView"), () => !$("#ticketsView").hidden && !document.querySelector(".mdl:not([hidden])"));
 
 /* ---------- AUTH WALL ---------- */
-const root = document.documentElement;
+const root = document.documentElement; // as classes .gate/.loading vivem no <html> (ver css/auth-gate.css)
 
+// Bloqueia o site: limpa qualquer estado da sessão anterior e deixa só o login visível.
 function lockSite(msg = "") {
   unsubT?.(); unsubM?.(); unsubT = unsubM = null; unsubAud?.(); unsubAud = null; auditoria = [];
   resetUpload(); Suporte.reset();
   tickets = []; cur = null; buyKey = null; adminMode = false;
   closeMenu();
   document.querySelectorAll(".mdl").forEach((m) => (m.hidden = true));
-  if ($("#ticketsView")) $("#ticketsView").hidden = true;
-  if ($("#emailForm")) $("#emailForm").reset(); signup = false;
-  if ($("#emSubmit")) $("#emSubmit").textContent = "Entrar";
-  if ($("#emSwitch")) $("#emSwitch").textContent = "Não tem conta? Cadastre-se";
+  $("#ticketsView").hidden = true;
+  $("#emailForm").reset(); signup = false;
+  $("#emSubmit").textContent = "Entrar"; $("#emSwitch").textContent = "Não tem conta? Cadastre-se";
   scrollTo(0, 0);
   root.classList.add("gate"); root.classList.remove("loading");
-  if ($("#loginModal .mdl-x")) $("#loginModal .mdl-x").hidden = true;
-  open("#loginModal"); if ($("#loginErr")) $("#loginErr").textContent = msg;
+  $("#loginModal .mdl-x").hidden = true; // login obrigatório: sem "X" (reforço do CSS)
+  open("#loginModal"); $("#loginErr").textContent = msg;
 }
+// Libera o site (só chamado quando o Firebase confirma um usuário logado).
 function unlockSite() {
-  close("#loginModal"); if ($("#emailForm")) $("#emailForm").reset(); if ($("#loginErr")) $("#loginErr").textContent = "";
+  close("#loginModal"); $("#emailForm").reset(); $("#loginErr").textContent = "";
   root.classList.remove("gate", "loading");
   scrollTo(0, 0);
 }
+// Rede de segurança: se o Firebase não responder, não deixa o loader eterno.
 const wallTimer = setTimeout(() => { if (root.classList.contains("loading")) lockSite("Conexão lenta. Tente entrar novamente."); }, 8000);
 
 /* ---------- login ---------- */
@@ -180,39 +184,32 @@ const erro = (c) => ({
   "auth/operation-not-allowed": "Este método de login não está ativado no Firebase.",
   "auth/account-exists-with-different-credential": "Já existe uma conta com este e-mail usando outro método de login.",
 }[c] ?? "Não foi possível entrar. Tente de novo.");
-const falha = (e) => { console.error(e); if ($("#loginErr")) $("#loginErr").textContent = erro(e.code); };
+const falha = (e) => { console.error(e); $("#loginErr").textContent = erro(e.code); };
 
-const DISCORD_PROVIDER_ID = "oidc.discord";
+// Discord entra como provedor OpenID Connect do Firebase (Authentication > Sign-in method > OpenID Connect)
+const DISCORD_PROVIDER_ID = "oidc.discord"; // TEM que ser igual ao Provider ID mostrado no Firebase Console
+const entrarPopup = (provider) => signInWithPopup(auth, provider).catch(falha);
 
-// ⚠️ Alterado para signInWithRedirect para evitar o bloqueio de Popup do GitHub Pages (COOP)
-const entrarRedirect = (provider) => signInWithRedirect(auth, provider).catch(falha);
-
-$("#gBtn")?.addEventListener("click", () => entrarRedirect(new GoogleAuthProvider()));
-$("#dBtn")?.addEventListener("click", () => {
+$("#gBtn").onclick = () => entrarPopup(new GoogleAuthProvider());
+$("#dBtn").onclick = () => {
   const provider = new OAuthProvider(DISCORD_PROVIDER_ID);
   provider.addScope("identify");
-  entrarRedirect(provider);
-});
-$("#emailForm")?.addEventListener("submit", (e) => {
-  e.preventDefault(); 
-  const em = $("#emEmail")?.value.trim(), pw = $("#emPass")?.value;
+  entrarPopup(provider);
+};
+$("#emailForm").onsubmit = (e) => {
+  e.preventDefault(); const em = $("#emEmail").value.trim(), pw = $("#emPass").value;
   (signup ? createUserWithEmailAndPassword(auth, em, pw) : signInWithEmailAndPassword(auth, em, pw)).catch(falha);
-});
-$("#emSwitch")?.addEventListener("click", (e) => { 
-  e.preventDefault(); signup = !signup;
-  if ($("#emSubmit")) $("#emSubmit").textContent = signup ? "Criar conta" : "Entrar";
-  e.target.textContent = signup ? "Já tem conta? Entrar" : "Não tem conta? Cadastre-se"; 
-});
-$("#emReset")?.addEventListener("click", (e) => { 
-  e.preventDefault(); 
-  const em = $("#emEmail")?.value.trim();
-  if (!em) { if ($("#loginErr")) $("#loginErr").textContent = "Digite seu e-mail acima."; return; }
-  sendPasswordResetEmail(auth, em).then(() => { if ($("#loginErr")) $("#loginErr").textContent = "Enviamos o link de redefinição."; }).catch(falha); 
-});
-
-function discordConectado() { return provIds().includes(DISCORD_PROVIDER_ID); }
+};
+$("#emSwitch").onclick = (e) => { e.preventDefault(); signup = !signup;
+  $("#emSubmit").textContent = signup ? "Criar conta" : "Entrar";
+  e.target.textContent = signup ? "Já tem conta? Entrar" : "Não tem conta? Cadastre-se"; };
+$("#emReset").onclick = (e) => { e.preventDefault(); const em = $("#emEmail").value.trim();
+  if (!em) { $("#loginErr").textContent = "Digite seu e-mail acima."; return; }
+  sendPasswordResetEmail(auth, em).then(() => ($("#loginErr").textContent = "Enviamos o link de redefinição.")).catch(falha); };
+/* ---------- Discord obrigatório: conectar/desconectar a conta (login por OAuth — nunca pelo token da conta) ---------- */
+function discordConectado() { return provIds().includes(DISCORD_PROVIDER_ID); } // provIds() é definida mais abaixo (function = hoisted)
 function googleConectado() { return provIds().includes("google.com"); }
-let dcPendingBuy = null;
+let dcPendingBuy = null; // produto que a pessoa tentou comprar antes de conectar: a compra continua sozinha assim que ela conecta
 const erroVinculo = (nome, c) => ({
   "auth/credential-already-in-use": `Essa conta do ${nome} já está vinculada a outro login deste site. Entre com ela diretamente pela tela de login, ou fale com o suporte.`,
   "auth/provider-already-linked": `Sua conta já está conectada ao ${nome}.`,
@@ -222,178 +219,170 @@ const erroVinculo = (nome, c) => ({
   "auth/requires-recent-login": "Por segurança, saia, entre de novo e tente conectar em seguida.",
   "auth/network-request-failed": "Sem conexão. Verifique a internet e tente de novo.",
 }[c] ?? "Não foi possível conectar. Tente de novo.");
-
-async function linkDiscordCore() {
+async function linkDiscordCore() { // adiciona o Discord à conta atual (OAuth com escopo "identify" — sem senha, sem token)
   const provider = new OAuthProvider(DISCORD_PROVIDER_ID); provider.addScope("identify");
   await linkWithPopup(user, provider);
   await user.reload().catch(() => {}); user = auth.currentUser; renderNav();
 }
-async function linkGoogleCore() {
+async function linkGoogleCore() { // adiciona o Google à conta atual
   await linkWithPopup(user, new GoogleAuthProvider());
   await user.reload().catch(() => {}); user = auth.currentUser; renderNav();
 }
 function abrirDcModal(motivo) {
-  if ($("#dcErr")) $("#dcErr").textContent = ""; 
-  if ($("#dcGo")) { $("#dcGo").disabled = false; $("#dcGo").textContent = "Conectar Discord"; }
-  if ($("#dcSub")) $("#dcSub").textContent = motivo || "Conecte sua conta do Discord para comprar e receber os cargos automáticos do servidor.";
+  $("#dcErr").textContent = ""; $("#dcGo").disabled = false; $("#dcGo").textContent = "Conectar Discord";
+  $("#dcSub").textContent = motivo || "Conecte sua conta do Discord para comprar e receber os cargos automáticos do servidor.";
   open("#dcModal");
 }
-$("#dcReqBtn")?.addEventListener("click", () => abrirDcModal());
-$("#dcGo")?.addEventListener("click", async () => {
-  const b = $("#dcGo"); if (b) { b.disabled = true; b.textContent = "Conectando..."; }
+$("#dcReqBtn").onclick = () => abrirDcModal();
+$("#dcGo").onclick = async () => {
+  const b = $("#dcGo"); b.disabled = true; b.textContent = "Conectando...";
   try {
     await linkDiscordCore(); close("#dcModal");
-    if (dcPendingBuy) { const k = dcPendingBuy; dcPendingBuy = null; askBuy(k); }
-  } catch (e) { console.error(e); if ($("#dcErr")) $("#dcErr").textContent = erroVinculo("Discord", e.code); if (b) { b.disabled = false; b.textContent = "Conectar Discord"; } }
-});
+    if (dcPendingBuy) { const k = dcPendingBuy; dcPendingBuy = null; askBuy(k); } // retoma a compra que ficou pendente
+  } catch (e) { console.error(e); $("#dcErr").textContent = erroVinculo("Discord", e.code); b.disabled = false; b.textContent = "Conectar Discord"; }
+};
 
+/* ---------- avatar padrão ---------- */
 const DEFAULT_AVATAR = "data:image/svg+xml;utf8," + encodeURIComponent(
   `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='#6d28d9'/><stop offset='1' stop-color='#c084fc'/></linearGradient><radialGradient id='h' cx='.3' cy='.2' r='.9'><stop offset='0' stop-color='#fff' stop-opacity='.3'/><stop offset='1' stop-color='#fff' stop-opacity='0'/></radialGradient></defs><rect width='96' height='96' fill='url(#g)'/><rect width='96' height='96' fill='url(#h)'/><circle cx='48' cy='37' r='15' fill='#fff' fill-opacity='.93'/><path d='M18 88c2-19 15-29 30-29s28 10 30 29z' fill='#fff' fill-opacity='.93'/></svg>`);
 const avatarOf = (u) => (u?.photoURL && /^https:\/\//.test(u.photoURL) ? u.photoURL : DEFAULT_AVATAR);
-const setImg = (img, src) => { if (!img) return; img.onerror = () => { img.onerror = null; img.src = DEFAULT_AVATAR; }; img.referrerPolicy = "no-referrer"; img.src = src; };
+const setImg = (img, src) => { img.onerror = () => { img.onerror = null; img.src = DEFAULT_AVATAR; }; img.referrerPolicy = "no-referrer"; img.src = src; };
 
+/* ---------- navbar: avatar + menu ---------- */
 const menu = $("#accMenu");
-const closeMenu = () => { if (menu) menu.hidden = true; if ($("#accBtn")) $("#accBtn").setAttribute("aria-expanded", "false"); };
+const closeMenu = () => { menu.hidden = true; $("#accBtn").setAttribute("aria-expanded", "false"); };
 const toggleMenu = () => {
-  if (!menu) return;
-  const show = menu.hidden; menu.hidden = !show; if ($("#accBtn")) $("#accBtn").setAttribute("aria-expanded", String(show));
-  if (show) { const nav = document.querySelector("nav"); if (nav) nav.classList.remove("open"); closePnl(); menu.querySelector('[role="menuitem"]')?.focus(); }
+  const show = menu.hidden; menu.hidden = !show; $("#accBtn").setAttribute("aria-expanded", String(show));
+  if (show) { document.querySelector("nav").classList.remove("open"); closePnl(); menu.querySelector('[role="menuitem"]')?.focus(); } // fecha o menu hambúrguer + o dropdown "Painel" + leva o foco pro 1º item
 };
 function renderNav() {
   const src = avatarOf(user);
   setImg($("#accImg"), src); setImg($("#accMenuImg"), src);
-  if ($("#accName")) $("#accName").textContent = user ? user.displayName || (user.email || "Cliente").split("@")[0] : "";
-  if ($("#accNick")) $("#accNick").textContent = user ? (user.displayName || (user.email || "Cliente").split("@")[0]).split(" ")[0] : "";
-  if ($("#accMail")) $("#accMail").textContent = user?.email || (user && provIds().includes(DISCORD_PROVIDER_ID) ? "Conta Discord" : "");
-  
-  if ($("#dcReqBtn")) $("#dcReqBtn").hidden = !user || discordConectado();
-  if ($("#panelBtn")) $("#panelBtn").hidden = !isStaff; 
-  if ($("#teamNavBtn")) $("#teamNavBtn").hidden = !can("equipe"); 
-  if ($("#consoleNavBtn")) $("#consoleNavBtn").hidden = !isAdmin;
-  if ($("#pnlGrp")) $("#pnlGrp").hidden = !isStaff && !can("equipe");
+  $("#accName").textContent = user ? user.displayName || (user.email || "Cliente").split("@")[0] : "";
+  $("#accNick").textContent = user ? (user.displayName || (user.email || "Cliente").split("@")[0]).split(" ")[0] : "";
+  $("#accMail").textContent = user?.email || (user && provIds().includes(DISCORD_PROVIDER_ID) ? "Conta Discord" : "");
+  $("#dcReqBtn").hidden = !user || discordConectado();
+  $("#panelBtn").hidden = !isStaff; $("#teamNavBtn").hidden = !can("equipe"); $("#consoleNavBtn").hidden = !isAdmin;
+  $("#pnlGrp").hidden = !isStaff && !can("equipe");
 
-  if ($("#accTags")) $("#accTags").replaceChildren(...(papel && papel !== "dono" ? [tagEl("r-" + papel, LABEL_PAPEL[papel])] : []), ...(meComprador ? [tagEl("comprador", "COMPRADOR")] : []), ...(user && !papel && compChecado && !meComprador ? [tagEl("visitante", "FUTURO COMPRADOR")] : []));
-  document.querySelectorAll(".acc-own").forEach((n) => { n.style.display = isAdmin ? "" : "none"; });
+  $("#accTags").replaceChildren(...(papel && papel !== "dono" ? [tagEl("r-" + papel, LABEL_PAPEL[papel])] : []), ...(meComprador ? [tagEl("comprador", "COMPRADOR")] : []), ...(user && !papel && compChecado && !meComprador ? [tagEl("visitante", "FUTURO COMPRADOR")] : []));
+  document.querySelectorAll(".acc-own").forEach((n) => { n.style.display = isAdmin ? "" : "none"; }); // coroa + DONO só para o dono
   if (!user) closeMenu();
   Suporte.sync({ user, papel });
 }
-$("#accBtn")?.addEventListener("click", (e) => { e.stopPropagation(); if (user) toggleMenu(); });
-$("#accBtn")?.addEventListener("keydown", (e) => {
-  if ((e.key === "ArrowDown" || e.key === "ArrowUp") && user) { e.preventDefault(); if (menu?.hidden) toggleMenu(); else menu?.querySelector('[role="menuitem"]')?.focus(); }
+$("#accBtn").onclick = (e) => { e.stopPropagation(); if (user) toggleMenu(); };
+$("#accBtn").addEventListener("keydown", (e) => { // seta para baixo/cima no avatar já abre o menu com o foco dentro
+  if ((e.key === "ArrowDown" || e.key === "ArrowUp") && user) { e.preventDefault(); if (menu.hidden) toggleMenu(); else menu.querySelector('[role="menuitem"]')?.focus(); }
 });
 navMenuTeclado(menu, closeMenu);
 document.addEventListener("click", (e) => { if (!e.target.closest("#acc")) closeMenu(); });
-addEventListener("keydown", (e) => { if (e.key === "Escape" && menu && !menu.hidden) { closeMenu(); $("#accBtn")?.focus(); } });
+addEventListener("keydown", (e) => { if (e.key === "Escape" && !menu.hidden) { closeMenu(); $("#accBtn").focus(); } });
 $("#mb")?.addEventListener("click", closeMenu);
-$("#miProfile")?.addEventListener("click", () => { closeMenu(); openProfile(); });
-$("#miTickets")?.addEventListener("click", () => { closeMenu(); openTickets(false); });
-$("#miSupport")?.addEventListener("click", () => { closeMenu(); Suporte.abrir(); });
-
+$("#miProfile").onclick = () => { closeMenu(); openProfile(); };
+$("#miTickets").onclick = () => { closeMenu(); openTickets(false); };
+$("#miSupport").onclick = () => { closeMenu(); Suporte.abrir(); };
+// Central de Suporte: "Ver pedido" abre o ticket de compra correspondente
 Suporte.init({ abrirPedido: (id, admin) => { Suporte.fechar(); openTickets(admin && isStaff, id); } });
-
+/* ---------- botão único "Painel" (dropdown com as opções da equipe) ---------- */
 const pnlMenu = $("#pnlMenu");
-const closePnl = () => { if (pnlMenu) pnlMenu.hidden = true; if ($("#pnlBtn")) $("#pnlBtn").setAttribute("aria-expanded", "false"); };
-$("#pnlBtn")?.addEventListener("click", (e) => {
+const closePnl = () => { pnlMenu.hidden = true; $("#pnlBtn").setAttribute("aria-expanded", "false"); };
+$("#pnlBtn").onclick = (e) => {
   e.stopPropagation();
-  if (can("equipe")) { const show = pnlMenu?.hidden; if (pnlMenu) pnlMenu.hidden = !show; if ($("#pnlBtn")) $("#pnlBtn").setAttribute("aria-expanded", String(show)); closeMenu(); if (show) pnlMenu?.querySelector('[role="menuitem"]:not([hidden])')?.focus(); }
-  else { openTickets(true); }
-});
-$("#pnlBtn")?.addEventListener("keydown", (e) => {
-  if ((e.key === "ArrowDown" || e.key === "ArrowUp") && can("equipe")) { e.preventDefault(); if (pnlMenu?.hidden) $("#pnlBtn")?.click(); else pnlMenu?.querySelector('[role="menuitem"]:not([hidden])')?.focus(); }
+  if (can("equipe")) { const show = pnlMenu.hidden; pnlMenu.hidden = !show; $("#pnlBtn").setAttribute("aria-expanded", String(show)); closeMenu(); if (show) pnlMenu.querySelector('[role="menuitem"]:not([hidden])')?.focus(); }
+  else { openTickets(true); } // só vendedor/suporte: um clique já abre o painel
+};
+$("#pnlBtn").addEventListener("keydown", (e) => {
+  if ((e.key === "ArrowDown" || e.key === "ArrowUp") && can("equipe")) { e.preventDefault(); if (pnlMenu.hidden) $("#pnlBtn").click(); else pnlMenu.querySelector('[role="menuitem"]:not([hidden])')?.focus(); }
 });
 navMenuTeclado(pnlMenu, closePnl);
 document.addEventListener("click", (e) => { if (!e.target.closest("#pnlGrp")) closePnl(); });
-addEventListener("keydown", (e) => { if (e.key === "Escape" && pnlMenu && !pnlMenu.hidden) { closePnl(); $("#pnlBtn")?.focus(); } });
-$("#panelBtn")?.addEventListener("click", () => { closePnl(); openTickets(true); });
-$("#teamNavBtn")?.addEventListener("click", () => { closePnl(); abrirEquipe(); });
-$("#consoleNavBtn")?.addEventListener("click", () => { closePnl(); abrirConsole(); });
-$("#miOut")?.addEventListener("click", () => { closeMenu(); signOut(auth); }); 
+addEventListener("keydown", (e) => { if (e.key === "Escape" && !pnlMenu.hidden) { closePnl(); $("#pnlBtn").focus(); } });
+$("#panelBtn").onclick = () => { closePnl(); openTickets(true); };
+$("#teamNavBtn").onclick = () => { closePnl(); abrirEquipe(); };
+$("#consoleNavBtn").onclick = () => { closePnl(); abrirConsole(); };
+$("#miOut").onclick = () => { closeMenu(); signOut(auth); }; // o onAuthStateChanged abaixo devolve para a tela de login
 renderNav();
 
+// ÚNICA fonte de verdade da tela: o site só é liberado aqui, quando o Firebase confirma o usuário.
 onAuthStateChanged(auth, (u) => {
   clearTimeout(wallTimer);
-  user = u; isAdmin = !!u && u.email === ADMIN_EMAIL && u.emailVerified; 
+  user = u; isAdmin = !!u && u.email === ADMIN_EMAIL && u.emailVerified; // só a interface; as regras do Firebase é que protegem
   unsubPapel?.(); unsubEq?.(); unsubComp?.(); unsubPapel = unsubEq = unsubComp = null; meComprador = false; compChecado = false;
   papel = isAdmin ? "dono" : null; isStaff = !!papel;
   if (u) {
+    // ao vivo: assim que um ticket seu for marcado como Concluído, "FUTURO COMPRADOR" vira "COMPRADOR" sem recarregar
     unsubComp = ouvirTickets(u, false, (l) => {
       if (user !== u) return;
       const v = l.some((t) => t.status === "concluido");
       if (v !== meComprador || !compChecado) {
         meComprador = v; compChecado = true; renderNav();
-        if (cur && msgsCache.length && $("#ticketsView") && !$("#ticketsView").hidden) renderMsgs(msgsCache);
+        if (cur && msgsCache.length && !$("#ticketsView").hidden) renderMsgs(msgsCache);
       }
-      if (!adminMode) processarNtf(l);
+      if (!adminMode) processarNtf(l); // "Meus Tickets": badge + som quando chega resposta nova
     });
-    if (!isAdmin) unsubPapel = ouvirMeuPapel(u, (p) => {
+    if (!isAdmin) unsubPapel = ouvirMeuPapel(u, (p) => { // vendedor/suporte: vale na hora, e some na hora se você remover
       papel = p; isStaff = !!p; renderNav();
       if (!isStaff && adminMode) closeTickets(); else if (cur) head();
     });
   }
   renderNav();
   if (u) unlockSite();
-  else { lockSite(); unreadIds = new Set(); primeiraCargaNtf = true; if ($("#miTicketsDot")) $("#miTicketsDot").hidden = true; if ($("#accDot")) $("#accDot").hidden = true; }
+  else { lockSite(); unreadIds = new Set(); primeiraCargaNtf = true; $("#miTicketsDot").hidden = $("#accDot").hidden = true; } // sem sessão: limpa os avisos
 });
 
-// Verifica se voltou de um login via redirecionamento (Google/Discord)
-getRedirectResult(auth).then((result) => {
-  if (result && result.user) {
-    console.log("Login via redirecionamento concluído com sucesso.");
-  }
-}).catch(falha);
-
+/* ---------- comprar -> modal de confirmação -> ticket ---------- */
 document.addEventListener("click", (e) => {
   const a = e.target.closest?.("[data-buy]"); const k = a?.dataset.buy;
   if (!a || !PRODUTOS[k]) return; e.preventDefault();
-  if (user) askBuy(k); 
+  if (user) askBuy(k); // sem sessão o site nem está visível; a checagem é só por segurança
 });
 function askBuy(k) {
   if (!discordConectado()) { dcPendingBuy = k; abrirDcModal("Para comprar, conecte sua conta do Discord. É rápido, e você já pode usar esse mesmo login depois."); return; }
-  buyKey = k; if ($("#buyName")) $("#buyName").textContent = PRODUTOS[k].nome; if ($("#buyPrice")) $("#buyPrice").textContent = `R$ ${PRODUTOS[k].preco},00`; open("#buyModal");
+  buyKey = k; $("#buyName").textContent = PRODUTOS[k].nome; $("#buyPrice").textContent = `R$ ${PRODUTOS[k].preco},00`; open("#buyModal");
 }
-$("#buyOk")?.addEventListener("click", async () => {
-  const b = $("#buyOk"); if (b) b.disabled = true;
+$("#buyOk").onclick = async () => {
+  const b = $("#buyOk"); b.disabled = true;
   try { const id = await criarTicket(user, buyKey); close("#buyModal"); openTickets(false, id); }
   catch (e) { alert("Não foi possível criar o ticket: " + e.message); }
-  if (b) b.disabled = false;
-});
+  b.disabled = false;
+};
 
+/* ---------- Meus Tickets / Painel Admin ---------- */
+// assinatura do que muda a aparência do chat: nome/foto de quem fala + quem já é COMPRADOR (redesenha quando algo disso muda)
 const sigAtual = () => cur ? [cur.userName, cur.userPhoto, cur.adminName, cur.adminPhoto,
   adminMode ? [...new Set(tickets.filter((x) => x.status === "concluido").map((x) => x.uid))].sort().join(",") : meComprador].join("|") : "";
 const ms = (t) => t?.toMillis?.() ?? Date.now();
 const fmt = (t) => (t?.toDate ? t.toDate().toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" }) : "");
 function openTickets(admin, select) {
-  focoAntesPainel = document.activeElement; 
-  adminMode = admin; cur = null; if ($("#tvTitle")) $("#tvTitle").textContent = admin ? (isAdmin ? "Painel Ticket Admin" : "Painel de Atendimento") : "Meus Tickets";
-  busca = ""; filtro = "todos"; if ($("#tvSearch")) $("#tvSearch").value = ""; if ($("#tvTools")) $("#tvTools").hidden = !admin; 
-  if ($("#tvMe")) $("#tvMe").textContent = user.displayName || user.email || ""; $("#ticketsView")?.classList.remove("open"); resetChat(); open("#ticketsView");
-  $("#tvBack")?.focus(); 
+  focoAntesPainel = document.activeElement; // para devolver o foco quando fechar (Esc ou "Voltar ao site")
+  adminMode = admin; cur = null; $("#tvTitle").textContent = admin ? (isAdmin ? "Painel Ticket Admin" : "Painel de Atendimento") : "Meus Tickets";
+  busca = ""; filtro = "todos"; $("#tvSearch").value = ""; $("#tvTools").hidden = !admin; // busca só no painel do dono
+  $("#tvMe").textContent = user.displayName || user.email || ""; $("#ticketsView").classList.remove("open"); resetChat(); open("#ticketsView");
+  $("#tvBack").focus(); // primeiro elemento focável do painel: quem navega só por teclado já entra com o foco lá dentro
   unsubT?.(); unsubT = ouvirTickets(user, admin, (l) => {
     tickets = l.sort((a, b) => ms(b.updatedAt) - ms(a.updatedAt));
     if (!adminMode) { const v = tickets.some((t) => t.status === "concluido"); if (v !== meComprador || !compChecado) { meComprador = v; compChecado = true; renderNav(); } }
     if (select) { const t = tickets.find((x) => x.id === select); if (t) { select = null; return pick(t); } }
     if (cur) cur = tickets.find((x) => x.id === cur.id) || cur; head(); renderList();
-    if (!adminMode) processarNtf(tickets);
+    if (!adminMode) processarNtf(tickets); // atualiza os pontinhos ao vivo com o painel aberto
     const sig = sigAtual();
     if (sig !== sigPerfis) { sigPerfis = sig; if (cur && msgsCache.length) renderMsgs(msgsCache); }
   });
 }
-function closeTickets() { 
-  unsubT?.(); unsubM?.(); unsubT = unsubM = null; resetUpload(); cur = null; 
-  if ($("#ticketsView")) $("#ticketsView").hidden = true; 
-  sync(); focoAntesPainel?.focus(); focoAntesPainel = null; 
-}
-$("#tvBack")?.addEventListener("click", closeTickets);
-$("#chBack")?.addEventListener("click", () => $("#ticketsView")?.classList.remove("open"));
-
+// "Voltar ao site": fecha só o painel de tickets (o usuário continua logado)
+function closeTickets() { unsubT?.(); unsubM?.(); unsubT = unsubM = null; resetUpload(); cur = null; $("#ticketsView").hidden = true; sync(); focoAntesPainel?.focus(); focoAntesPainel = null; }
+$("#tvBack").onclick = closeTickets;
+$("#chBack").onclick = () => $("#ticketsView").classList.remove("open");
+/* ---------- busca e filtro (painel admin) ---------- */
 const norm = (x) => String(x ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 const termos = () => norm(busca).split(/\s+/).filter(Boolean);
 const alvoBusca = (t) => norm([t.userName, t.userEmail, t.productName, STATUS_LABEL[t.status], t.id, "#" + t.id.slice(0, 6)].join(" "));
 const bate = (t, ts) => ts.every((x) => alvoBusca(t).includes(x));
+// escreve o texto destacando os termos buscados (sem innerHTML: seguro contra XSS)
 function marca(parent, texto) {
   const ts = termos(); texto = String(texto ?? "");
   if (!ts.length) { parent.append(texto); return parent; }
-  const n = norm(texto);
+  const n = norm(texto); // normalização mantém o mesmo tamanho na maioria dos casos
   if (n.length !== texto.length) { parent.append(texto); return parent; }
   const marcado = new Array(texto.length).fill(false);
   ts.forEach((x) => { for (let i = n.indexOf(x); i !== -1; i = n.indexOf(x, i + x.length)) for (let k = i; k < i + x.length; k++) marcado[k] = true; });
@@ -418,14 +407,14 @@ function atualizarFiltros(base) {
   const c = { todos: base.length, pendente: 0, concluido: 0, reembolsado: 0 };
   base.forEach((t) => { if (c[t.status] != null) c[t.status]++; });
   document.querySelectorAll("#tvFilters .fchip").forEach((b) => {
-    b.classList.toggle("on", b.dataset.f === filtro); const bEl = b.querySelector("b"); if (bEl) bEl.textContent = c[b.dataset.f] ?? 0;
+    b.classList.toggle("on", b.dataset.f === filtro); b.querySelector("b").textContent = c[b.dataset.f] ?? 0;
   });
-  if ($("#tvSearchX")) $("#tvSearchX").hidden = !busca;
+  $("#tvSearchX").hidden = !busca;
 }
 function renderList() {
-  const box = $("#tvList"); if (!box) return; box.replaceChildren();
+  const box = $("#tvList"); box.replaceChildren();
   const ts = adminMode ? termos() : [];
-  const comp = adminMode ? new Set(tickets.filter((x) => x.status === "concluido").map((x) => x.uid)) : null;
+  const comp = adminMode ? new Set(tickets.filter((x) => x.status === "concluido").map((x) => x.uid)) : null; // quem já comprou
   const porBusca = adminMode ? tickets.filter((t) => bate(t, ts)) : tickets;
   if (adminMode) atualizarFiltros(porBusca);
   const lista = adminMode && filtro !== "todos" ? porBusca.filter((t) => t.status === filtro) : porBusca;
@@ -435,7 +424,7 @@ function renderList() {
     const b = el("button", "tk-i" + (cur?.id === t.id ? " on" : "")); b.type = "button";
     const col = el("div", "tk-b"), l1 = el("div", "tk-l1"), nm = el("div", "tk-n");
     nm.append(marca(el("span", "tk-t"), adminMode ? t.userName || "Cliente" : t.productName));
-    if (comp?.has(t.uid)) nm.append(tagEl("comprador", "COMPRADOR"));
+    if (comp?.has(t.uid)) nm.append(tagEl("comprador", "COMPRADOR")); // tag ao lado do nome
     else if (adminMode) nm.append(tagEl("visitante", "FUTURO COMPRADOR"));
     l1.append(nm);
     col.append(l1);
@@ -450,48 +439,43 @@ function renderList() {
     b.onclick = () => pick(t); box.append(b);
   });
 }
-$("#tvSearch")?.addEventListener("input", (e) => { busca = e.target.value; renderList(); });
-$("#tvSearch")?.addEventListener("keydown", (e) => { if (e.key === "Escape" && busca) { e.stopPropagation(); limparBusca(); } });
-function limparBusca() { busca = ""; if ($("#tvSearch")) $("#tvSearch").value = ""; renderList(); $("#tvSearch")?.focus(); }
-$("#tvSearchX")?.addEventListener("click", limparBusca);
-$("#chCopyId")?.addEventListener("click", async () => {
+$("#tvSearch").addEventListener("input", (e) => { busca = e.target.value; renderList(); });
+$("#tvSearch").addEventListener("keydown", (e) => { if (e.key === "Escape" && busca) { e.stopPropagation(); limparBusca(); } });
+function limparBusca() { busca = ""; $("#tvSearch").value = ""; renderList(); $("#tvSearch").focus(); }
+$("#tvSearchX").onclick = limparBusca;
+$("#chCopyId").onclick = async () => { // copia o ID completo do ticket (útil para localizar o pedido no suporte)
   if (!cur) return;
   try { await navigator.clipboard.writeText(cur.id); } catch { return; }
-  const b = $("#chCopyId"); b?.classList.add("ok");
-  setTimeout(() => b?.classList.remove("ok"), 1500);
-});
-document.querySelectorAll("#tvFilters .fchip").forEach((b) => b.addEventListener("click", () => { filtro = b.dataset.f; renderList(); }));
+  const b = $("#chCopyId"); b.classList.add("ok");
+  setTimeout(() => b.classList.remove("ok"), 1500);
+};
+document.querySelectorAll("#tvFilters .fchip").forEach((b) => (b.onclick = () => { filtro = b.dataset.f; renderList(); }));
 
 function head() {
-  if ($("#chTitle")) $("#chTitle").textContent = cur ? cur.productName : "Selecione um ticket";
-  if ($("#chSub")) $("#chSub").textContent = cur ? (adminMode ? [cur.userName, cur.userEmail, "R$ " + (cur.price ?? "") + ",00"].filter(Boolean).join(" · ") : "Ticket #" + cur.id.slice(0, 6).toUpperCase()) : "";
-  const cp = $("#chCopyId"); if (cp) { cp.hidden = !cur; cp.classList.remove("ok"); }
-  if (cp && cur) cp.title = "Copiar ID do ticket (#" + cur.id.slice(0, 6).toUpperCase() + ")";
+  $("#chTitle").textContent = cur ? cur.productName : "Selecione um ticket";
+  $("#chSub").textContent = cur ? (adminMode ? [cur.userName, cur.userEmail, "R$ " + (cur.price ?? "") + ",00"].filter(Boolean).join(" · ") : "Ticket #" + cur.id.slice(0, 6).toUpperCase()) : "";
+  const cp = $("#chCopyId"); cp.hidden = !cur; cp.classList.remove("ok");
+  if (cur) cp.title = "Copiar ID do ticket (#" + cur.id.slice(0, 6).toUpperCase() + ")";
   const s = $("#chStatus");
-  if (s) { s.textContent = cur ? (STATUS_LABEL[cur.status] ?? cur.status) : ""; s.className = "stt " + (cur?.status || ""); }
-  
-  $("#stPend")?.classList.toggle("on", cur?.status === "pendente");
-  $("#stDone")?.classList.toggle("on", cur?.status === "concluido");
-  
+  s.textContent = cur ? (STATUS_LABEL[cur.status] ?? cur.status) : "";
+  s.className = "stt " + (cur?.status || "");
+  $("#stPend").classList.toggle("on", cur?.status === "pendente");
+  $("#stDone").classList.toggle("on", cur?.status === "concluido");
   const rf = $("#stRefund"), reemb = cur?.status === "reembolsado";
-  if (rf) { rf.classList.toggle("on", reemb); rf.disabled = reemb; rf.textContent = reemb ? "Reembolsado" : "Reembolsar"; }
-  
-  if ($("#stPend")) $("#stPend").hidden = $("#stDone") ? $("#stDone").hidden = !can("status") : false;
-  if ($("#stRefund")) $("#stRefund").hidden = !can("reembolso");
-  
-  if ($("#stPend")) $("#stPend").disabled = $("#stDone") ? $("#stDone").disabled = cur?.status === "reembolsado" && !isAdmin : false;
-  
-  if ($("#admTools")) $("#admTools").hidden = !(adminMode && isStaff && cur && (can("status") || can("reembolso"))); 
-  if ($("#chatForm")) $("#chatForm").hidden = !cur;
-  $("#chatBox")?.classList.toggle("vazio", !cur);
+  rf.classList.toggle("on", reemb); rf.disabled = reemb; rf.textContent = reemb ? "Reembolsado" : "Reembolsar";
+  $("#stPend").hidden = $("#stDone").hidden = !can("status"); $("#stRefund").hidden = !can("reembolso");
+  $("#stPend").disabled = $("#stDone").disabled = cur?.status === "reembolsado" && !isAdmin; // só o dono desfaz reembolso
+  $("#admTools").hidden = !(adminMode && isStaff && cur && (can("status") || can("reembolso"))); $("#chatForm").hidden = !cur;
+  $("#chatBox").classList.toggle("vazio", !cur);
 }
-function resetChat() { resetUpload(); if ($("#chatBox")) $("#chatBox").replaceChildren(); head(); }
+function resetChat() { resetUpload(); $("#chatBox").replaceChildren(); head(); }
 function pick(t) {
-  if (cur?.id !== t.id) resetUpload();
-  cur = t; msgsCache = []; head(); renderList(); $("#ticketsView")?.classList.add("open"); unsubM?.();
+  if (cur?.id !== t.id) resetUpload(); // trocou de ticket: cancela/limpa o anexo pendente
+  cur = t; msgsCache = []; head(); renderList(); $("#ticketsView").classList.add("open"); unsubM?.();
   unsubM = ouvirMensagens(t.id, renderMsgs);
   if (!adminMode) marcarVisto(t.id, t.updatedAt?.toMillis?.());
 }
+// transforma http(s)://... e www.... em links clicáveis (só http/https: nunca javascript:)
 function linkify(p, text) {
   text.split(/((?:https?:\/\/|www\.)[^\s<]+)/g).forEach((s, i) => {
     if (!(i % 2)) { p.append(s); return; }
@@ -501,6 +485,7 @@ function linkify(p, text) {
   });
 }
 
+/* ---------- chat (design v3) ---------- */
 const horaDe = (t) => t?.toDate ? t.toDate().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }) : "enviando…";
 function rotuloDia(d) {
   const hoje = new Date(), ontem = new Date(); ontem.setDate(hoje.getDate() - 1);
@@ -510,19 +495,21 @@ function rotuloDia(d) {
 }
 const crownIcon = () => {
   const s = el("span", "crown");
-  s.innerHTML = '<svg viewBox="0 0 100 80"><use href="#cr"/></svg>';
+  s.innerHTML = '<svg viewBox="0 0 100 80"><use href="#cr"/></svg>'; // símbolo #cr já existe no index.html
   return s;
 };
 
+// nome/foto ATUAIS de quem escreveu (a mensagem só guarda uma cópia antiga)
 function perfilDe(m) {
   if (user && m.uid === user.uid) return { name: user.displayName || m.name, photo: user.photoURL || "" };
   if (m.isAdmin && (!m.role || m.role === "dono")) return { name: cur?.adminName || m.name, photo: cur?.adminPhoto || m.photo };
   if (cur && m.uid === cur.uid) return { name: cur.userName || m.name, photo: cur.userPhoto || m.photo };
   return { name: m.name, photo: m.photo };
 }
+// cartão bonito para a mensagem automática de reembolso (só textContent: seguro contra XSS)
 function cartaoReembolso(valor, razao) {
   const c = el("div", "rfc"), h = el("div", "rfc-h"), ic = el("span", "rfc-ic"), tx = el("div", "rfc-t");
-  ic.innerHTML = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>';
+  ic.innerHTML = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>'; // SVG fixo
   tx.append(el("small", "", "REEMBOLSO CONFIRMADO"), el("span", "", "Valor devolvido a você"));
   h.append(ic, tx); c.append(h, el("div", "rfc-v", valor));
   const [motivo, ...resto] = String(razao || "").split(" — "), obs = resto.join(" — ");
@@ -534,7 +521,7 @@ function cartaoReembolso(valor, razao) {
 }
 function renderMsgs(list) {
   msgsCache = list; sigPerfis = sigAtual();
-  const box = $("#chatBox"); if (!box) return; box.replaceChildren(); box.classList.remove("vazio");
+  const box = $("#chatBox"); box.replaceChildren(); box.classList.remove("vazio");
   let ultimoDia = null;
   const comp = adminMode ? new Set(tickets.filter((x) => x.status === "concluido").map((x) => x.uid)) : null;
   list.forEach((m) => {
@@ -542,7 +529,7 @@ function renderMsgs(list) {
     if (d.toDateString() !== ultimoDia) { ultimoDia = d.toDateString(); box.append(el("div", "dsep", rotuloDia(d))); }
 
     const mine = !!user && m.uid === user.uid;
-    const rol = m.isAdmin ? (m.role === "vendedor" || m.role === "suporte" ? m.role : "dono") : null;
+    const rol = m.isAdmin ? (m.role === "vendedor" || m.role === "suporte" ? m.role : "dono") : null; // cargo de quem escreveu
     const row = el("div", "msg " + (m.isAdmin ? "adm" : "cli") + (rol && rol !== "dono" ? " r-" + rol : "") + (mine ? " mine" : ""));
 
     const pf = perfilDe(m), av = el("div", "mav");
@@ -555,7 +542,7 @@ function renderMsgs(list) {
     if (rol === "dono") nome.append(el("span", "dono", "DONO"));
     else if (rol) nome.append(tagEl("r-" + rol, LABEL_PAPEL[rol]));
     else if (adminMode ? comp.has(m.uid) : (meComprador && user && m.uid === user.uid)) nome.append(tagEl("comprador", "COMPRADOR"));
-    else if (adminMode || (compChecado && user && m.uid === user.uid)) nome.append(tagEl("visitante", "FUTURO COMPRADOR"));
+    else if (adminMode || (compChecado && user && m.uid === user.uid)) nome.append(tagEl("visitante", "FUTURO COMPRADOR")); // cliente que ainda não comprou
 
     const bub = el("div", "bub");
     const rfm = m.isAdmin && m.text ? /^↺ Reembolso registrado: (R\$ [\d.,]+)\.(?: Motivo: ([\s\S]*)\.)?$/.exec(m.text.trim()) : null;
@@ -566,9 +553,10 @@ function renderMsgs(list) {
         const a = el("a"); a.href = m.fileUrl; a.target = "_blank"; a.rel = "noopener";
         const i = el("img", "mimg"); i.src = m.fileUrl; i.alt = m.fileName || ""; i.loading = "lazy"; i.onload = () => { box.scrollTop = box.scrollHeight; }; a.append(i); bub.append(a);
       } else {
+        // botão de download bem visível: ícone, nome, tamanho e o selo BAIXAR
         const a = el("a", "mfile"); a.href = m.fileUrl; a.rel = "noopener"; a.setAttribute("download", m.fileName || "arquivo");
         a.title = "Clique para baixar " + (m.fileName || "o arquivo");
-        const ico = el("span", "mf-ico");
+        const ico = el("span", "mf-ico"); // SVG fixo (sem dados do usuário)
         ico.innerHTML = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="M7 11l5 5 5-5"/><path d="M5 20h14"/></svg>';
         const info = el("span", "mf-info");
         info.append(el("span", "mf-name", m.fileName || "arquivo"),
@@ -584,13 +572,16 @@ function renderMsgs(list) {
   box.scrollTop = box.scrollHeight;
 }
 
+/* ---------- anexos: seleção, progresso e envio (Fase 4) ---------- */
+// Tolerante: se o bloco novo do <form id="chatForm"> ainda não foi colado no index.html,
+// o resto do site (perfil, tickets, status...) continua funcionando; só os anexos ficam desativados.
 const uplOk = () => ["#upl", "#uplX", "#uplFill", "#uplMeta", "#uplName", "#uplThumb", "#uplIc", "#uplErr"].every((s) => $(s));
 if (!uplOk()) console.error('[Nx7] Formulário do chat desatualizado: cole o novo bloco <form id="chatForm"> no index.html (Fase 4). Anexos desativados.');
-if ($("#chFile")) $("#chFile").accept = ARQUIVOS_ACEITOS;
+$("#chFile").accept = ARQUIVOS_ACEITOS;
 
 function uplEstado(cls, meta) {
   if (!uplOk()) return;
-  $("#upl").className = "upl" + (cls ? " " + cls : "");
+  $("#upl").className = "upl" + (cls ? " " + cls : ""); // "", "sending", "done" ou "err" (a barra só aparece nos 3 últimos)
   if (meta != null) $("#uplMeta").textContent = meta;
 }
 function uplBarra(frac) { const b = $("#uplFill"); if (b) b.style.width = Math.round(frac * 100) + "%"; }
@@ -600,6 +591,7 @@ function setOcupado(on) {
   ["#chSend", "#chText", "#chFile"].forEach((s) => { const x = $(s); if (x) x.disabled = on; });
   const b = $("#chSend"); if (b) b.textContent = on ? "Enviando…" : "Enviar";
 }
+// limpa o anexo; se um upload estiver rodando, ele é cancelado
 function resetUpload() {
   try { up.task?.cancel(); } catch {}
   up.task = null; up.file = null; up.busy = false;
@@ -608,9 +600,9 @@ function resetUpload() {
   if (uplOk()) { $("#upl").hidden = true; $("#uplThumb").hidden = true; $("#uplIc").hidden = false; uplBarra(0); uplEstado("", ""); }
   uplErr(""); setOcupado(false);
 }
-$("#uplX")?.addEventListener("click", resetUpload);
+$("#uplX")?.addEventListener("click", resetUpload); // "×": remove o anexo ou cancela o envio em andamento
 
-$("#chFile")?.addEventListener("change", (e) => {
+$("#chFile").onchange = (e) => {
   const f = e.target.files[0]; if (!f) return;
   if (!uplOk()) { e.target.value = ""; alert("Para enviar arquivos, cole o novo formulário do chat no index.html (Fase 4)."); return; }
   const problema = validarArquivo(f);
@@ -622,12 +614,12 @@ $("#chFile")?.addEventListener("change", (e) => {
   $("#uplThumb").hidden = !img; $("#uplIc").hidden = img;
   $("#uplName").textContent = f.name; uplBarra(0);
   uplEstado("", fmtBytes(f.size) + " · pronto para enviar"); $("#upl").hidden = false;
-});
+};
 
-$("#chatForm")?.addEventListener("submit", async (e) => {
+$("#chatForm").onsubmit = async (e) => {
   e.preventDefault();
   if (up.busy) return;
-  const f = uplOk() ? up.file : null, text = $("#chText")?.value.trim();
+  const f = uplOk() ? up.file : null, text = $("#chText").value.trim();
   if (!cur || (!text && !f)) return;
   up.busy = true; setOcupado(true); uplErr("");
   if (f) { uplBarra(0); uplEstado("sending", "Enviando… 0%"); }
@@ -641,17 +633,18 @@ $("#chatForm")?.addEventListener("submit", async (e) => {
       },
     }, adminMode && isStaff);
     if (f) { uplBarra(1); uplEstado("done", "Enviado ✓"); await new Promise((r) => setTimeout(r, 800)); }
-    if ($("#chText")) $("#chText").value = ""; resetUpload();
+    $("#chText").value = ""; resetUpload();
   } catch (err) {
-    if (err.code === "storage/canceled") return; 
+    if (err.code === "storage/canceled") return; // o usuário apertou "×": o resetUpload já limpou a tela
     console.error(err);
     uplErr(err.message || "Não foi possível enviar.");
     if (f) uplEstado("err", "Falhou. Clique em Enviar para tentar de novo.");
   } finally {
     up.busy = false; up.task = null; setOcupado(false);
   }
-});
+};
 
+/* ---------- status do ticket (admin) ---------- */
 async function mudarStatus(novo) {
   if (!cur || !can("status") || cur.status === novo) return;
   const btns = [$("#stPend"), $("#stDone")], id = cur.id, antigo = cur.status;
@@ -661,77 +654,82 @@ async function mudarStatus(novo) {
     if (cur?.id === id) cur = { ...cur, status: st, ...limpa };
     head(); renderList();
   };
-  btns.forEach((b) => { if (b) b.disabled = true; });
-  aplicar(novo);                                  
+  btns.forEach((b) => (b.disabled = true));
+  aplicar(novo);                                   // reflete na tela na hora
   try {
     await definirStatus(id, novo, antigo === "reembolsado");
+    // cargo COMPRADOR no Discord: dá ao concluir; tira se saiu de "concluído" (e não tem outra compra)
     if (novo === "concluido") {
-      avisarVendaConcluida(id);
+      avisarVendaConcluida(id); // webhook: "fulano comprou X"
       registrarAuditoria("venda", "concluida", { alvo: id, detalhe: `${cur?.productName || ""} — ${brl(cur?.price)}` }, user, papel);
     }
     if (novo === "concluido" || antigo === "concluido") sincronizarDiscord(user, { action: "buyer", ticketId: id, grant: novo === "concluido" });
   }
-  catch (e) { aplicar(antigo); alert(e.message); }
-  btns.forEach((b) => { if (b) b.disabled = false; });
+  catch (e) { aplicar(antigo); alert(e.message); } // o banco recusou: desfaz
+  btns.forEach((b) => (b.disabled = false));
 }
-$("#stPend")?.addEventListener("click", () => mudarStatus("pendente"));
-$("#stDone")?.addEventListener("click", () => mudarStatus("concluido"));
+$("#stPend").onclick = () => mudarStatus("pendente");
+$("#stDone").onclick = () => mudarStatus("concluido");
 
-$("#stRefund")?.addEventListener("click", () => {
+/* ---------- reembolso (admin) ---------- */
+$("#stRefund").onclick = () => {
   if (!cur || !isAdmin || cur.status === "reembolsado") return;
-  if ($("#rfProd")) $("#rfProd").textContent = cur.productName; if ($("#rfVal")) $("#rfVal").textContent = brl(cur.price);
-  if ($("#rfWho")) $("#rfWho").textContent = [cur.userName, cur.userEmail].filter(Boolean).join(" · ");
-  if ($("#rfMot")) $("#rfMot").selectedIndex = 0; if ($("#rfObs")) $("#rfObs").value = ""; if ($("#rfPago")) $("#rfPago").checked = false; rfLimpaArquivo();
-  if ($("#rfOk")) $("#rfOk").disabled = true; if ($("#rfErr")) $("#rfErr").textContent = "";
+  $("#rfProd").textContent = cur.productName; $("#rfVal").textContent = brl(cur.price);
+  $("#rfWho").textContent = [cur.userName, cur.userEmail].filter(Boolean).join(" · ");
+  $("#rfMot").selectedIndex = 0; $("#rfObs").value = ""; $("#rfPago").checked = false; rfLimpaArquivo();
+  $("#rfOk").disabled = true; $("#rfErr").textContent = "";
   open("#refundModal");
-});
-if ($("#rfFile")) $("#rfFile").accept = ARQUIVOS_ACEITOS;
-function rfLimpaArquivo() { if ($("#rfFile")) $("#rfFile").value = ""; if ($("#rfFileN")) $("#rfFileN").textContent = ""; if ($("#rfFileX")) $("#rfFileX").hidden = true; }
-$("#rfFile")?.addEventListener("change", () => {
-  const f = $("#rfFile")?.files[0]; if (!f) return rfLimpaArquivo();
+};
+$("#rfFile").accept = ARQUIVOS_ACEITOS;
+function rfLimpaArquivo() { $("#rfFile").value = ""; $("#rfFileN").textContent = ""; $("#rfFileX").hidden = true; }
+$("#rfFile").onchange = () => {
+  const f = $("#rfFile").files[0]; if (!f) return rfLimpaArquivo();
   const erro = validarArquivo(f);
-  if (erro) { rfLimpaArquivo(); if ($("#rfErr")) $("#rfErr").textContent = erro; return; }
-  if ($("#rfErr")) $("#rfErr").textContent = ""; if ($("#rfFileN")) $("#rfFileN").textContent = f.name + " · " + fmtBytes(f.size); if ($("#rfFileX")) $("#rfFileX").hidden = false;
-});
-$("#rfFileX")?.addEventListener("click", rfLimpaArquivo);
-$("#rfPago")?.addEventListener("change", (e) => { if ($("#rfOk")) $("#rfOk").disabled = !e.target.checked; });
-$("#rfOk")?.addEventListener("click", async () => {
+  if (erro) { rfLimpaArquivo(); $("#rfErr").textContent = erro; return; }
+  $("#rfErr").textContent = ""; $("#rfFileN").textContent = f.name + " · " + fmtBytes(f.size); $("#rfFileX").hidden = false;
+};
+$("#rfFileX").onclick = rfLimpaArquivo;
+$("#rfPago").onchange = (e) => ($("#rfOk").disabled = !e.target.checked); // só libera depois de marcar que o dinheiro já voltou
+$("#rfOk").onclick = async () => {
   if (!cur || !isAdmin || cur.status === "reembolsado") return;
-  const id = cur.id, valor = cur.price ?? 0, motivo = $("#rfMot")?.value, obs = $("#rfObs")?.value.trim(), btn = $("#rfOk");
-  if (btn) { btn.disabled = true; btn.textContent = "Registrando…"; } if ($("#rfErr")) $("#rfErr").textContent = "";
+  const id = cur.id, valor = cur.price ?? 0, motivo = $("#rfMot").value, obs = $("#rfObs").value.trim(), btn = $("#rfOk");
+  btn.disabled = true; btn.textContent = "Registrando…"; $("#rfErr").textContent = "";
   try {
-    const r = await reembolsarTicket(id, user, { motivo, obs, valor, file: $("#rfFile")?.files[0] || null,
-      onProgress: (p) => { if (p?.pct != null && btn) btn.textContent = "Enviando comprovante… " + Math.round(p.pct * 100) + "%"; } });
+    const r = await reembolsarTicket(id, user, { motivo, obs, valor, file: $("#rfFile").files[0] || null,
+      onProgress: (p) => { if (p?.pct != null) btn.textContent = "Enviando comprovante… " + Math.round(p.pct * 100) + "%"; } });
     if (r?.aviso) alert(r.aviso);
     const extra = { status: "reembolsado", refundAmount: valor, refundReason: [motivo, obs].filter(Boolean).join(" — ") };
     tickets = tickets.map((t) => (t.id === id ? { ...t, ...extra } : t));
     if (cur?.id === id) cur = { ...cur, ...extra };
     close("#refundModal"); head(); renderList();
-    sincronizarDiscord(user, { action: "buyer", ticketId: id, grant: false });
+    sincronizarDiscord(user, { action: "buyer", ticketId: id, grant: false }); // reembolsou: tira o cargo COMPRADOR (se não tiver outra compra)
   } catch (e) {
-    if ($("#rfErr")) $("#rfErr").textContent = e.message || "Não foi possível registrar o reembolso.";
-    if (btn) btn.disabled = !$("#rfPago")?.checked;
+    $("#rfErr").textContent = e.message || "Não foi possível registrar o reembolso.";
+    btn.disabled = !$("#rfPago").checked;
   }
-  if (btn) btn.textContent = "Confirmar reembolso";
-});
+  btn.textContent = "Confirmar reembolso";
+};
 
+/* ---------- equipe (só o dono) ---------- */
 const msgEq = (e) => e?.message || "Não deu certo. Tente de novo.";
+// frase curta sobre o que aconteceu com o cargo no Discord (vazio se o Discord não está configurado / não se aplica)
 const notaDiscord = (r) => !r || r.skipped ? ""
   : r.ok ? " Cargo do Discord atualizado."
   : r.reason === "not_in_guild" ? " (Cargo do Discord não aplicado: a pessoa não está no seu servidor.)"
   : r.reason === "bot_sem_permissao" ? " (Cargo do Discord não aplicado: coloque o cargo do bot acima dos outros cargos.)"
   : " (Não consegui atualizar o cargo no Discord.)";
-function equipeErro(t) { if ($("#tmOk")) $("#tmOk").textContent = ""; if ($("#tmErr")) $("#tmErr").textContent = t || ""; }
-function equipeOk(t) { if ($("#tmErr")) $("#tmErr").textContent = ""; if ($("#tmOk")) $("#tmOk").textContent = t || ""; }
+function equipeErro(t) { $("#tmOk").textContent = ""; $("#tmErr").textContent = t || ""; }
+function equipeOk(t) { $("#tmErr").textContent = ""; $("#tmOk").textContent = t || ""; }
 function dicaEquipe() {
-  const d = $("#tmTipo")?.value === "discord";
-  if ($("#tmVal")) { $("#tmVal").placeholder = d ? "ID do Discord (só números)" : "email@gmail.com"; $("#tmVal").inputMode = d ? "numeric" : "email"; }
-  if ($("#tmHint")) $("#tmHint").textContent = d
+  const d = $("#tmTipo").value === "discord";
+  $("#tmVal").placeholder = d ? "ID do Discord (só números)" : "email@gmail.com";
+  $("#tmVal").inputMode = d ? "numeric" : "email";
+  $("#tmHint").textContent = d
     ? "No Discord: Configurações > Avançado > ligue o Modo desenvolvedor. Depois clique com o botão direito no perfil da pessoa > Copiar ID do usuário."
     : "Use o e-mail da conta Google dela (ou o e-mail do cadastro, já confirmado). É com essa conta que ela vai entrar no site.";
 }
 function renderEquipe() {
-  const box = $("#tmList"); if (!box) return; box.replaceChildren();
+  const box = $("#tmList"); box.replaceChildren();
   if (!equipe.length) return box.append(el("p", "empty", "Ninguém na equipe ainda. Adicione alguém acima."));
   equipe.forEach((m) => {
     const r = el("div", "tm-r"), av = el("div", "tm-av", (m.nick || m.valor || "?")[0].toUpperCase()), info = el("div", "tm-i");
@@ -766,8 +764,8 @@ function renderEquipe() {
 }
 const DESC_CARGO = { dono: "Controle total do site.", vendedor: "Cuida das vendas e dos pedidos.", suporte: "Atende os clientes nos tickets." };
 const LINHAS_PERM = [["Ver e responder tickets", true], ["Marcar Pendente / Concluído", "status"], ["Fazer reembolsos", "reembolso"], ["Gerenciar a equipe", "equipe"]];
-function renderPermissoes() { 
-  const box = $("#tmRoles"); if (!box) return; box.replaceChildren();
+function renderPermissoes() { // lê a tabela PERMS, então muda sozinho se você mudar quem pode o quê
+  const box = $("#tmRoles"); box.replaceChildren();
   ["dono", "vendedor", "suporte"].forEach((r) => {
     const card = el("div", "tm-role r-" + r), ul = el("ul", "tm-rp");
     card.append(tagEl(r === "dono" ? "dono" : "r-" + r, LABEL_PAPEL[r]), el("p", "tm-rd", DESC_CARGO[r]));
@@ -783,18 +781,19 @@ function abrirEquipe() {
   equipeErro(); dicaEquipe(); renderPermissoes(); renderEquipe(); open("#teamModal");
   unsubEq?.(); unsubEq = ouvirEquipe((l) => { equipe = l.sort((a, b) => String(a.nick || a.valor).localeCompare(String(b.nick || b.valor))); renderEquipe(); }, (e) => equipeErro(msgEq(e)));
 }
-$("#tmTipo")?.addEventListener("change", dicaEquipe);
-$("#tmAdd")?.addEventListener("click", async () => {
+$("#tmTipo").onchange = dicaEquipe;
+$("#tmAdd").onclick = async () => {
   if (!can("equipe")) return;
-  const b = $("#tmAdd"); if (b) b.disabled = true; equipeErro();
+  const b = $("#tmAdd"); b.disabled = true; equipeErro();
   try {
-    const dc = await adicionarMembro({ tipo: $("#tmTipo")?.value, valor: $("#tmVal")?.value, role: $("#tmRole")?.value, nick: $("#tmNick")?.value }, user);
-    if ($("#tmVal")) $("#tmVal").value = ""; if ($("#tmNick")) $("#tmNick").value = ""; equipeOk("Adicionado! A pessoa já pode entrar no site com essa conta." + notaDiscord(dc));
+    const dc = await adicionarMembro({ tipo: $("#tmTipo").value, valor: $("#tmVal").value, role: $("#tmRole").value, nick: $("#tmNick").value }, user);
+    $("#tmVal").value = ""; $("#tmNick").value = ""; equipeOk("Adicionado! A pessoa já pode entrar no site com essa conta." + notaDiscord(dc));
   } catch (e) { equipeErro(msgEq(e)); }
-  if (b) b.disabled = false;
-});
+  b.disabled = false;
+};
 
-let csEstado = null, csStats = null, csPagina = "geral";
+/* ---------- Console Nx7 (só o dono): menu lateral + status + gráficos + auditoria ---------- */
+let csEstado = null, csStats = null, csPagina = "geral"; // última leitura de cada (cacheadas ao trocar de página)
 const SERVICOS = [
   ["firestore", "Firebase (Firestore)"], ["discordVendas", "Discord · Avisos de venda"],
   ["discordCargos", "Discord · Cargos (Worker)"], ["discordLogs", "Discord · Logs (suporte/cargos)"],
@@ -814,11 +813,12 @@ function cardServico(nome, st) {
   return card;
 }
 function renderStatus(box, estado) {
-  if (!box) return; box.replaceChildren();
+  box.replaceChildren();
   SERVICOS.forEach(([k, nome]) => box.append(cardServico(nome, estado?.[k] || { ok: null, msg: "Carregando…" })));
 }
+// gráfico simples de barras horizontais (sem lib: largura em % do maior valor)
 function barChart(box, dados, labels, cores, { vazio = "Sem dados ainda." } = {}) {
-  if (!box) return; box.replaceChildren();
+  box.replaceChildren();
   const entradas = Object.entries(dados || {}).filter(([, v]) => v > 0);
   if (!entradas.length) return box.append(el("p", "empty", vazio));
   const max = Math.max(...entradas.map(([, v]) => v), 1);
@@ -833,16 +833,15 @@ function barChart(box, dados, labels, cores, { vazio = "Sem dados ainda." } = {}
   });
 }
 function statTile(box, titulo, valor, sub) {
-  if (!box) return;
   const t = el("div", "cs-tile"); t.append(el("span", "", titulo), el("b", "", valor));
   if (sub) t.append(el("small", "", sub));
   box.append(t);
 }
-function fmtAud(ts) {
+function fmtAud(ts) { // Firestore Timestamp -> "dd/mm hh:mm"
   const d = ts?.toDate ? ts.toDate() : null;
   return d ? d.toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" }) : "agora";
 }
-function detalheAud(a) {
+function detalheAud(a) { // se a pessoa tem apelido na equipe, mostra ele no lugar da chave; sem apelido fica como estava
   const det = a.detalhe || "";
   if (a.tipo !== "cargo" || !a.alvo) return det;
   const nome = String(equipe.find((x) => x.key === a.alvo)?.nick || "").trim();
@@ -858,7 +857,7 @@ function linhaAudit(a) {
   return row;
 }
 function renderAuditoria() {
-  const box = $("#csAudList"); if (!box) return;
+  const box = $("#csAudList");
   const lista = filtroAud === "todos" ? auditoria : auditoria.filter((a) => a.tipo === filtroAud);
   box.replaceChildren();
   if (!lista.length) return box.append(el("p", "empty", "Nada registrado ainda."));
@@ -866,18 +865,16 @@ function renderAuditoria() {
 }
 function renderGeral() {
   renderStatus($("#csStatusMini"), csEstado);
-  const tiles = $("#csTiles"); if (tiles) tiles.replaceChildren();
-  if (csStats && tiles) {
+  const tiles = $("#csTiles"); tiles.replaceChildren();
+  if (csStats) {
     statTile(tiles, "Receita (concluídas)", brl(csStats.receitaConcluida), `${csStats.tickets?.concluido || 0} vendas concluídas`);
     statTile(tiles, "Reembolsado", brl(csStats.totalReembolsado), `${csStats.tickets?.reembolsado || 0} reembolsos`);
     statTile(tiles, "Chamados abertos", (csStats.suporte?.aberto || 0) + (csStats.suporte?.em_andamento || 0) + (csStats.suporte?.aguardando_cliente || 0), `${csStats.totalSuporte || 0} no total`);
     statTile(tiles, "Equipe", csStats.equipeTotal || 1, "incluindo o dono");
   }
-  const recentes = $("#csRecentes"); if (recentes) recentes.replaceChildren();
-  if (recentes) {
-    if (!auditoria.length) recentes.append(el("p", "empty", "Nada registrado ainda."));
-    else auditoria.slice(0, 6).forEach((a) => recentes.append(linhaAudit(a)));
-  }
+  const recentes = $("#csRecentes"); recentes.replaceChildren();
+  if (!auditoria.length) recentes.append(el("p", "empty", "Nada registrado ainda."));
+  else auditoria.slice(0, 6).forEach((a) => recentes.append(linhaAudit(a)));
 }
 function renderVendas() { barChart($("#csChartVendas"), csStats?.tickets, LABEL_TICKET, COR_TICKET); }
 function renderSuporte() { barChart($("#csChartSuporte"), csStats?.suporte, LABEL_SUPORTE, COR_SUPORTE); }
@@ -907,6 +904,7 @@ function abrirConsole() {
   unsubAud?.(); unsubAud = ouvirAuditoria((l) => { auditoria = l; renderPaginaAtual(); });
 }
 
+/* ---------- Meu Perfil ---------- */
 const PROVEDORES = {
   "google.com": { nome: "Google", cls: "google" },
   [DISCORD_PROVIDER_ID]: { nome: "Discord", cls: "discord" },
@@ -936,8 +934,9 @@ function pfAba(nome) {
   });
   const a = $("#pfPanePerfil"), b = $("#pfPaneSeg"); if (a) a.hidden = nome !== "perfil"; if (b) b.hidden = nome !== "seguranca";
 }
-document.querySelectorAll(".pf-tab").forEach((b) => b.addEventListener("click", () => pfAba(b.dataset.tab)));
+document.querySelectorAll(".pf-tab").forEach((b) => (b.onclick = () => pfAba(b.dataset.tab)));
 
+/* força da senha: 0 (vazio) a 4 */
 const ROT_FORCA = ["", "Fraca", "Razoável", "Boa", "Forte"];
 function forcaSenha(s) {
   if (!s) return 0;
@@ -951,32 +950,32 @@ function forcaSenha(s) {
 const DICA_SENHA = "Mínimo de 6 caracteres. Quanto mais longa e variada, mais forte.";
 function pwReset() {
   const f = $("#pwForm"); if (!f) return;
-  f.reset(); if ($("#pwMeter")) $("#pwMeter").dataset.n = "0"; setT("#pwLbl", DICA_SENHA); setT("#pwErr", ""); setT("#pwOk", "");
+  f.reset(); $("#pwMeter").dataset.n = "0"; setT("#pwLbl", DICA_SENHA); setT("#pwErr", ""); setT("#pwOk", "");
   f.querySelectorAll(".pw input").forEach((i) => (i.type = "password"));
   f.querySelectorAll(".pw-eye").forEach((b) => (b.textContent = "Mostrar"));
 }
 
 function openProfile() {
-  newPhoto = null; removePhoto = false; if ($("#pfErr")) $("#pfErr").textContent = ""; if ($("#pfFile")) $("#pfFile").value = ""; setT("#pfPhotoNote", "");
-  if ($("#pfName")) $("#pfName").value = user.displayName || ""; if ($("#pfMail")) $("#pfMail").value = emailTxt();
+  newPhoto = null; removePhoto = false; $("#pfErr").textContent = ""; $("#pfFile").value = ""; setT("#pfPhotoNote", "");
+  $("#pfName").value = user.displayName || ""; $("#pfMail").value = emailTxt();
   setImg($("#pfImg"), avatarOf(user));
-  if ($("#pfPaneSeg")) { 
+  if ($("#pfPaneSeg")) { // layout novo (index.html atualizado)
     pfCabecalho();
-    $("#pfBadges")?.replaceChildren(...provIds().map((id) => el("span", "pf-badge " + (PROVEDORES[id]?.cls || ""), PROVEDORES[id]?.nome || id)), ...badgesPapel());
+    $("#pfBadges").replaceChildren(...provIds().map((id) => el("span", "pf-badge " + (PROVEDORES[id]?.cls || ""), PROVEDORES[id]?.nome || id)), ...badgesPapel());
     setT("#pfInfoMetodo", nomesProv().join(" + ") || "—");
     setT("#pfInfoCriada", dataBR(user.metadata?.creationTime));
     setT("#pfInfoAcesso", dataBR(user.metadata?.lastSignInTime, true));
     const senha = temSenha();
-    if ($("#pwForm")) $("#pwForm").hidden = !senha; 
-    if ($("#pwOther")) $("#pwOther").hidden = senha;
+    $("#pwForm").hidden = !senha; $("#pwOther").hidden = senha;
     if (!senha) setT("#pwOtherTxt", `Você entra com ${nomesProv().join(" e ") || "outro método"}, então a senha dessa conta é gerenciada por lá. Para trocá-la, use as configurações de segurança do próprio serviço.`);
     pwReset(); pfAba("perfil"); pfDiscordView(); pfGoogleView();
   }
   open("#profileModal");
 }
+// recorta no centro e reduz para 256x256 (foto leve e padronizada)
 async function lerImagem(file) {
   try { return await createImageBitmap(file); }
-  catch { 
+  catch { // alguns navegadores/arquivos falham no createImageBitmap: tenta pelo <img>
     const url = URL.createObjectURL(file);
     try {
       return await new Promise((ok, no) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => no(new Error("Não consegui ler essa imagem. Tente outra (PNG ou JPG).")); i.src = url; });
@@ -986,108 +985,114 @@ async function lerImagem(file) {
 async function cropAvatar(file, size = 256) {
   const img = await lerImagem(file), w = img.width || img.naturalWidth, h = img.height || img.naturalHeight, s = Math.min(w, h);
   const c = document.createElement("canvas"); c.width = c.height = size;
-  const g = c.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, size, size);
+  const g = c.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, size, size); // PNG com fundo transparente vira branco no JPEG
   g.drawImage(img, (w - s) / 2, (h - s) / 2, s, s, 0, 0, size, size);
   const blob = await new Promise((ok) => c.toBlob(ok, "image/jpeg", 0.9));
   if (!blob) throw new Error("Não consegui preparar a foto. Tente outra imagem.");
   return blob;
 }
-$("#pfFile")?.addEventListener("change", (e) => {
+$("#pfFile").onchange = (e) => {
   const f = e.target.files[0]; if (!f) return;
-  if (!/^image\/(png|jpe?g|webp|gif)$/.test(f.type)) { if ($("#pfErr")) $("#pfErr").textContent = "Escolha uma imagem PNG, JPG, WEBP ou GIF."; e.target.value = ""; return; }
-  if (f.size > 10 * 1024 * 1024) { if ($("#pfErr")) $("#pfErr").textContent = "Imagem muito grande (máx. 10 MB)."; e.target.value = ""; return; }
-  if ($("#pfErr")) $("#pfErr").textContent = ""; newPhoto = f; removePhoto = false;
+  if (!/^image\/(png|jpe?g|webp|gif)$/.test(f.type)) { $("#pfErr").textContent = "Escolha uma imagem PNG, JPG, WEBP ou GIF."; e.target.value = ""; return; }
+  if (f.size > 10 * 1024 * 1024) { $("#pfErr").textContent = "Imagem muito grande (máx. 10 MB)."; e.target.value = ""; return; }
+  $("#pfErr").textContent = ""; newPhoto = f; removePhoto = false;
   if (previewUrl) URL.revokeObjectURL(previewUrl);
-  previewUrl = URL.createObjectURL(f); if ($("#pfImg")) $("#pfImg").src = previewUrl;
+  previewUrl = URL.createObjectURL(f); $("#pfImg").src = previewUrl;
   setT("#pfPhotoNote", "Nova foto escolhida — clique em “Salvar alterações”.");
-});
-$("#pfRemove")?.addEventListener("click", () => { newPhoto = null; removePhoto = true; if ($("#pfFile")) $("#pfFile").value = ""; if ($("#pfImg")) $("#pfImg").src = DEFAULT_AVATAR; setT("#pfPhotoNote", "Foto removida — clique em “Salvar alterações”."); });
+};
+$("#pfRemove").onclick = () => { newPhoto = null; removePhoto = true; $("#pfFile").value = ""; $("#pfImg").src = DEFAULT_AVATAR; setT("#pfPhotoNote", "Foto removida — clique em “Salvar alterações”."); };
 
 const MSG_FOTO = "O envio da foto demorou demais. Confira sua conexão e tente de novo.";
-$("#pfForm")?.addEventListener("submit", async (e) => {
-  e.preventDefault(); const b = $("#pfSave"), err = $("#pfErr"); if (err) err.textContent = ""; if (b) { b.disabled = true; b.textContent = "Salvando..."; }
+$("#pfForm").onsubmit = async (e) => {
+  e.preventDefault(); const b = $("#pfSave"), err = $("#pfErr"); err.textContent = ""; b.disabled = true; b.textContent = "Salvando...";
   try {
-    const name = $("#pfName")?.value.trim();
+    const name = $("#pfName").value.trim();
     if (name.length < 2) throw new Error("Digite um nome com pelo menos 2 caracteres.");
-    let url = null;
+    let url = null; // 1) a foto primeiro: se falhar, nada é alterado pela metade
     if (newPhoto) {
       try {
-        if (b) b.textContent = "Preparando foto...";
+        b.textContent = "Preparando foto...";
         const blob = await cropAvatar(newPhoto);
-        url = await comTimeout(enviarAvatar(user.uid, blob, (p) => { if (b) b.textContent = `Enviando foto... ${Math.round(p * 100)}%`; }), 60000, MSG_FOTO);
+        url = await comTimeout(enviarAvatar(user.uid, blob, (p) => (b.textContent = `Enviando foto... ${Math.round(p * 100)}%`)), 60000, MSG_FOTO);
       } catch (x) {
         console.error(x);
-        if (err) err.textContent = "A foto não foi salva: " + (x.message || "falha no envio.") + " (o nome não foi alterado)";
-        return;
+        err.textContent = "A foto não foi salva: " + (x.message || "falha no envio.") + " (o nome não foi alterado)";
+        return; // mantém o painel aberto para você ver o motivo
       }
     }
-    if (b) b.textContent = "Salvando...";
+    b.textContent = "Salvando...";
     const patch = { displayName: name };
     if (url) patch.photoURL = url; else if (removePhoto) patch.photoURL = null;
     await updateProfile(user, patch);
-    await user.reload().catch(() => {});
+    await user.reload().catch(() => {}); // garante que o navegador já enxerga o nome/foto novos
     newPhoto = null; removePhoto = false; setT("#pfPhotoNote", "");
     renderNav(); pfCabecalho(); setImg($("#pfImg"), avatarOf(user));
+    // atualiza o nome/foto que aparecem nos tickets do próprio cliente (o painel admin lê daí); se as regras não permitirem, segue sem erro
     atualizarPerfilNosTickets(user.uid, user.displayName || name, user.photoURL || "", isAdmin).catch((x) => console.warn("tickets não atualizados:", x.code || x));
-    if (msgsCache.length && $("#ticketsView") && !$("#ticketsView").hidden) renderMsgs(msgsCache);
+    if (msgsCache.length && !$("#ticketsView").hidden) renderMsgs(msgsCache); // atualiza o chat aberto na hora
     close("#profileModal");
-  } catch (x) { console.error(x); if (err) err.textContent = x.message || "Não foi possível salvar."; }
-  finally { if (b) { b.disabled = false; b.textContent = "Salvar alterações"; } }
-});
+  } catch (x) { console.error(x); err.textContent = x.message || "Não foi possível salvar."; }
+  finally { b.disabled = false; b.textContent = "Salvar alterações"; }
+};
 
+/* ---------- Segurança: Discord (conectar / desconectar a conta) ---------- */
 function pfDiscordView() {
   const box = $("#pfDiscordBox"); if (!box) return;
   const on = discordConectado();
   box.classList.toggle("on", on);
   setT("#pfDiscordStatus", on ? "Conectado" : "Não conectado");
-  if ($("#pfDiscordErr")) $("#pfDiscordErr").textContent = "";
+  $("#pfDiscordErr").textContent = "";
   const btn = $("#pfDiscordBtn");
-  if (btn) { btn.disabled = false; btn.textContent = on ? "Desconectar" : "Conectar Discord"; btn.classList.toggle("red", on); }
-  if (btn) btn.onclick = on ? pfDesconectarDiscord : pfConectarDiscord;
+  btn.disabled = false; btn.textContent = on ? "Desconectar" : "Conectar Discord";
+  btn.classList.toggle("red", on);
+  btn.onclick = on ? pfDesconectarDiscord : pfConectarDiscord;
 }
 async function pfConectarDiscord() {
-  const b = $("#pfDiscordBtn"); if (b) { b.disabled = true; b.textContent = "Conectando..."; }
+  const b = $("#pfDiscordBtn"); b.disabled = true; b.textContent = "Conectando...";
   try { await linkDiscordCore(); pfDiscordView(); }
-  catch (e) { console.error(e); if ($("#pfDiscordErr")) $("#pfDiscordErr").textContent = erroVinculo("Discord", e.code); if (b) { b.disabled = false; b.textContent = "Conectar Discord"; } }
+  catch (e) { console.error(e); $("#pfDiscordErr").textContent = erroVinculo("Discord", e.code); b.disabled = false; b.textContent = "Conectar Discord"; }
 }
 async function pfDesconectarDiscord() {
-  if (provIds().length < 2) { if ($("#pfDiscordErr")) $("#pfDiscordErr").textContent = "Essa é sua única forma de entrar no site. Adicione e-mail/senha ou Google antes de desconectar o Discord."; return; }
+  if (provIds().length < 2) { $("#pfDiscordErr").textContent = "Essa é sua única forma de entrar no site. Adicione e-mail/senha ou Google antes de desconectar o Discord."; return; }
   if (!confirm("Desconectar sua conta do Discord? Você vai precisar conectar de novo para comprar ou manter os cargos do servidor.")) return;
-  const b = $("#pfDiscordBtn"); if (b) { b.disabled = true; b.textContent = "Desconectando..."; }
+  const b = $("#pfDiscordBtn"); b.disabled = true; b.textContent = "Desconectando...";
   try { await unlink(user, DISCORD_PROVIDER_ID); await user.reload().catch(() => {}); user = auth.currentUser; renderNav(); pfDiscordView(); }
-  catch (e) { console.error(e); if ($("#pfDiscordErr")) $("#pfDiscordErr").textContent = "Não foi possível desconectar agora. Tente de novo."; if (b) { b.disabled = false; b.textContent = "Desconectar"; } }
+  catch (e) { console.error(e); $("#pfDiscordErr").textContent = "Não foi possível desconectar agora. Tente de novo."; b.disabled = false; b.textContent = "Desconectar"; }
 }
 
+/* ---------- Segurança: Google (conectar / desconectar a conta) ---------- */
 function pfGoogleView() {
   const box = $("#pfGoogleBox"); if (!box) return;
   const on = googleConectado();
   box.classList.toggle("on", on);
   setT("#pfGoogleStatus", on ? "Conectado" : "Não conectado");
-  if ($("#pfGoogleErr")) $("#pfGoogleErr").textContent = "";
+  $("#pfGoogleErr").textContent = "";
   const btn = $("#pfGoogleBtn");
-  if (btn) { btn.disabled = false; btn.textContent = on ? "Desconectar" : "Conectar Google"; btn.classList.toggle("red", on); }
-  if (btn) btn.onclick = on ? pfDesconectarGoogle : pfConectarGoogle;
+  btn.disabled = false; btn.textContent = on ? "Desconectar" : "Conectar Google";
+  btn.classList.toggle("red", on);
+  btn.onclick = on ? pfDesconectarGoogle : pfConectarGoogle;
 }
 async function pfConectarGoogle() {
-  const b = $("#pfGoogleBtn"); if (b) { b.disabled = true; b.textContent = "Conectando..."; }
+  const b = $("#pfGoogleBtn"); b.disabled = true; b.textContent = "Conectando...";
   try { await linkGoogleCore(); pfGoogleView(); }
-  catch (e) { console.error(e); if ($("#pfGoogleErr")) $("#pfGoogleErr").textContent = erroVinculo("Google", e.code); if (b) { b.disabled = false; b.textContent = "Conectar Google"; } }
+  catch (e) { console.error(e); $("#pfGoogleErr").textContent = erroVinculo("Google", e.code); b.disabled = false; b.textContent = "Conectar Google"; }
 }
 async function pfDesconectarGoogle() {
-  if (provIds().length < 2) { if ($("#pfGoogleErr")) $("#pfGoogleErr").textContent = "Essa é sua única forma de entrar no site. Adicione e-mail/senha ou Discord antes de desconectar o Google."; return; }
+  if (provIds().length < 2) { $("#pfGoogleErr").textContent = "Essa é sua única forma de entrar no site. Adicione e-mail/senha ou Discord antes de desconectar o Google."; return; }
   if (!confirm("Desconectar sua conta do Google?")) return;
-  const b = $("#pfGoogleBtn"); if (b) { b.disabled = true; b.textContent = "Desconectando..."; }
+  const b = $("#pfGoogleBtn"); b.disabled = true; b.textContent = "Desconectando...";
   try { await unlink(user, "google.com"); await user.reload().catch(() => {}); user = auth.currentUser; renderNav(); pfGoogleView(); }
-  catch (e) { console.error(e); if ($("#pfGoogleErr")) $("#pfGoogleErr").textContent = "Não foi possível desconectar agora. Tente de novo."; if (b) { b.disabled = false; b.textContent = "Desconectar"; } }
+  catch (e) { console.error(e); $("#pfGoogleErr").textContent = "Não foi possível desconectar agora. Tente de novo."; b.disabled = false; b.textContent = "Desconectar"; }
 }
 
-document.querySelectorAll(".pw-eye").forEach((btn) => btn.addEventListener("click", () => {
+/* ---------- Segurança: trocar senha (só para contas criadas com e-mail e senha) ---------- */
+document.querySelectorAll(".pw-eye").forEach((btn) => (btn.onclick = () => {
   const i = btn.previousElementSibling, mostrar = i.type === "password";
   i.type = mostrar ? "text" : "password"; btn.textContent = mostrar ? "Ocultar" : "Mostrar";
 }));
 $("#pwNew")?.addEventListener("input", (e) => {
   const n = forcaSenha(e.target.value);
-  if ($("#pwMeter")) $("#pwMeter").dataset.n = String(n);
+  $("#pwMeter").dataset.n = String(n);
   setT("#pwLbl", n ? "Força da senha: " + ROT_FORCA[n] : DICA_SENHA);
 });
 const ERROS_SENHA = {
@@ -1100,18 +1105,18 @@ const ERROS_SENHA = {
 };
 $("#pwForm")?.addEventListener("submit", async (e) => {
   e.preventDefault();
-  const atual = $("#pwCur")?.value, n1 = $("#pwNew")?.value, n2 = $("#pwNew2")?.value, b = $("#pwSave");
+  const atual = $("#pwCur").value, n1 = $("#pwNew").value, n2 = $("#pwNew2").value, b = $("#pwSave");
   setT("#pwErr", ""); setT("#pwOk", "");
   if (n1.length < 6) return setT("#pwErr", "A nova senha precisa ter pelo menos 6 caracteres.");
   if (n1 !== n2) return setT("#pwErr", "As senhas novas não são iguais.");
   if (n1 === atual) return setT("#pwErr", "A nova senha precisa ser diferente da atual.");
-  if (b) { b.disabled = true; b.textContent = "Alterando..."; }
+  b.disabled = true; b.textContent = "Alterando...";
   try {
-    await reauthenticateWithCredential(user, EmailAuthProvider.credential(user.email, atual)); 
+    await reauthenticateWithCredential(user, EmailAuthProvider.credential(user.email, atual)); // confirma que é você
     await updatePassword(user, n1);
     pwReset(); setT("#pwOk", "Senha alterada com sucesso.");
   } catch (x) { console.error(x); setT("#pwErr", ERROS_SENHA[x.code] ?? "Não foi possível alterar a senha. Tente de novo."); }
-  if (b) { b.disabled = false; b.textContent = "Alterar senha"; }
+  b.disabled = false; b.textContent = "Alterar senha";
 });
 $("#pwForgot")?.addEventListener("click", async () => {
   setT("#pwErr", ""); setT("#pwOk", "");
@@ -1119,36 +1124,37 @@ $("#pwForgot")?.addEventListener("click", async () => {
   catch (x) { console.error(x); setT("#pwErr", ERROS_SENHA[x.code] ?? "Não foi possível enviar o e-mail agora."); }
 });
 
+/* ---------- Excluir conta (LGPD) ---------- */
 const provs = () => user.providerData.map((p) => p.providerId);
-$("#pfDelete")?.addEventListener("click", () => {
+$("#pfDelete").onclick = () => {
   close("#profileModal");
-  if ($("#dlStep1")) $("#dlStep1").hidden = false; if ($("#dlStep2")) $("#dlStep2").hidden = true; if ($("#dlConfirm")) $("#dlConfirm").value = ""; if ($("#dlPass")) $("#dlPass").value = "";
-  if ($("#dlErr")) $("#dlErr").textContent = ""; if ($("#dlGo")) $("#dlGo").disabled = true; if ($("#dlPassWrap")) $("#dlPassWrap").hidden = !provs().includes("password");
+  $("#dlStep1").hidden = false; $("#dlStep2").hidden = true; $("#dlConfirm").value = ""; $("#dlPass").value = "";
+  $("#dlErr").textContent = ""; $("#dlGo").disabled = true; $("#dlPassWrap").hidden = !provs().includes("password");
   open("#deleteModal");
-});
-$("#dlNext")?.addEventListener("click", () => { if ($("#dlStep1")) $("#dlStep1").hidden = true; if ($("#dlStep2")) $("#dlStep2").hidden = false; $("#dlConfirm")?.focus(); });
-$("#dlConfirm")?.addEventListener("input", () => { if ($("#dlGo")) $("#dlGo").disabled = $("#dlConfirm").value.trim().toUpperCase() !== "EXCLUIR"; });
-async function reautenticar() {
+};
+$("#dlNext").onclick = () => { $("#dlStep1").hidden = true; $("#dlStep2").hidden = false; $("#dlConfirm").focus(); };
+$("#dlConfirm").oninput = () => { $("#dlGo").disabled = $("#dlConfirm").value.trim().toUpperCase() !== "EXCLUIR"; };
+async function reautenticar() { // o Firebase exige login recente para apagar a conta
   const p = provs();
   if (p.includes("google.com")) await reauthenticateWithPopup(user, new GoogleAuthProvider());
   else if (p.includes(DISCORD_PROVIDER_ID)) await reauthenticateWithPopup(user, new OAuthProvider(DISCORD_PROVIDER_ID));
   else if (p.includes("password")) {
-    const pw = $("#dlPass")?.value;
+    const pw = $("#dlPass").value;
     if (!pw) throw Object.assign(new Error("Digite sua senha para confirmar."), { code: "x" });
     await reauthenticateWithCredential(user, EmailAuthProvider.credential(user.email, pw));
   }
 }
-$("#dlGo")?.addEventListener("click", async () => {
-  const b = $("#dlGo"), err = $("#dlErr"); if (err) err.textContent = ""; if (b) { b.disabled = true; b.textContent = "Excluindo..."; }
+$("#dlGo").onclick = async () => {
+  const b = $("#dlGo"), err = $("#dlErr"); err.textContent = ""; b.disabled = true; b.textContent = "Excluindo...";
   try {
     await reautenticar();
     await excluirDadosDoUsuario(user.uid);
-    await deleteUser(user); 
+    await deleteUser(user); // dispara onAuthStateChanged(null) -> volta para a tela de login
     alert("Sua conta e seus dados foram excluídos.");
   } catch (x) {
-    if (err) err.textContent = ({ "auth/requires-recent-login": "Por segurança, saia, entre de novo e tente excluir logo em seguida.",
+    err.textContent = ({ "auth/requires-recent-login": "Por segurança, saia, entre de novo e tente excluir logo em seguida.",
       "auth/invalid-credential": "Senha incorreta.", "auth/wrong-password": "Senha incorreta.", "auth/popup-closed-by-user": "Confirmação cancelada." }[x.code])
       ?? x.message ?? "Não foi possível excluir. Tente de novo.";
-    if (b) { b.disabled = false; b.textContent = "Excluir definitivamente"; }
+    b.disabled = false; b.textContent = "Excluir definitivamente";
   }
-});
+};
