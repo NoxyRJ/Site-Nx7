@@ -1,0 +1,190 @@
+rules_version = '2';
+// ============================================================
+//  Nx7 — regras do Firestore (dono + equipe vendedor/suporte)
+//  Publique em: Firebase Console > Firestore Database > Regras > Publicar
+//  FAÇA BACKUP das regras antigas antes de colar estas.
+// ============================================================
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- quem é quem ----------
+    function signed() { return request.auth != null; }
+    function mail()   { return request.auth.token.get('email', null); }
+
+    // DONO: o MESMO e-mail do firebase-config.js (ADMIN_EMAIL), com e-mail verificado
+    function isDono() { return signed() && mail() == 'thiagocoelhodavos@gmail.com' && request.auth.token.get('email_verified', false) == true; }
+
+    // as TRÊS chaves possíveis do usuário logado na coleção "staff":
+    //  - e-mail ("email:fulano@gmail.com") — SÓ vale com e-mail VERIFICADO (conta Google já vem verificada).
+    //    Sem isso, qualquer pessoa poderia criar uma conta e-mail/senha com o e-mail de um membro da equipe
+    //    e herdar o cargo dele;
+    //  - Discord ("discord:ID") — o ID vem do login OIDC (oidc.discord): o uid do Firebase é
+    //    aleatório, então o ID real do Discord fica em token.firebase.identities;
+    //  - uid (caso antigo, quando o uid já era "discord:ID").
+    function emailVerificado() { return request.auth.token.get('email_verified', false) == true; }
+    function emailKey() { return mail() != null && emailVerificado() ? 'email:' + mail().lower() : null; }
+
+    // ---------- validações reutilizadas ----------
+    // e-mail gravado no documento tem que ser o da própria conta (ninguém se passa por outra pessoa no painel)
+    function emailDaConta() { return mail() == null ? '' : mail(); }
+    // anexos: só links do SEU bucket do Supabase (impede link externo/rastreador disfarçado de arquivo)
+    function anexoOk(u) {
+      return u == null || (u is string
+        && u.matches('^https://azwvqmyveyegebeamrva\\.supabase\\.co/storage/v1/object/public/nx7-arquivos/.*'));
+    }
+    function mensagemOk(d) {
+      return d.keys().hasOnly(['uid', 'name', 'photo', 'isAdmin', 'role', 'text', 'fileUrl', 'fileName', 'fileType', 'fileSize', 'sys', 'createdAt'])
+        && d.text is string && d.text.size() <= 2500
+        && d.createdAt == request.time
+        && anexoOk(d.get('fileUrl', null));
+    }
+    // produto e preço só podem ser os da loja (o cliente não escolhe o valor)
+    function produtoOk(d) {
+      return (d.product == 'orbs'  && d.productName == 'Nx7 - Orbs Automatic'  && d.price == 25)
+          || (d.product == 'msg'   && d.productName == 'Nx7 - Message Manager' && d.price == 25)
+          || (d.product == 'combo' && d.productName == 'Combo Nx7 Completo'    && d.price == 40);
+    }
+    function discordKey() {
+      return ('oidc.discord' in request.auth.token.firebase.identities)
+        ? 'discord:' + request.auth.token.firebase.identities['oidc.discord'][0]
+        : null;
+    }
+    function minhasChaves() {
+      return [request.auth.uid]
+        .concat(emailKey() != null ? [emailKey()] : [])
+        .concat(discordKey() != null ? [discordKey()] : []);
+    }
+    function cargoEm(k) {
+      return k != null && exists(/databases/$(database)/documents/staff/$(k))
+        ? get(/databases/$(database)/documents/staff/$(k)).data.role : null;
+    }
+    function staffRole() {
+      return cargoEm(emailKey()) != null ? cargoEm(emailKey())
+           : cargoEm(discordKey()) != null ? cargoEm(discordKey())
+           : cargoEm(request.auth.uid);
+    }
+    function isVendedor() { return signed() && staffRole() == 'vendedor'; }
+    function isSuporte()  { return signed() && staffRole() == 'suporte'; }
+    function isStaff()    { return isDono() || isVendedor() || isSuporte(); }
+
+    // ---------- equipe ----------
+    match /staff/{key} {
+      allow get: if signed() && (isDono() || key in minhasChaves());   // cada um lê só o próprio cargo (pelas duas chaves possíveis)
+      allow list: if isDono();
+      allow create, update: if isDono() && request.resource.data.role in ['vendedor', 'suporte'];
+      allow delete: if isDono();
+    }
+
+    // ---------- auditoria (console do dono) ----------
+    // Registro de ações da equipe (cargos, vendas, reembolsos, suporte) que serve de "backup" dos avisos
+    // no Discord: a equipe pode CRIAR um registro (ao realizar a ação), mas só o DONO consegue ler ou apagar.
+    // Assim, se alguém apagar a mensagem do bot no Discord para esconder algo, o registro continua aqui.
+    match /audit/{id} {
+      allow read, delete: if isDono();
+      allow update: if false;
+      allow create: if isStaff()
+        && request.resource.data.quemUid == request.auth.uid
+        && request.resource.data.keys().hasOnly(['tipo', 'acao', 'alvo', 'detalhe', 'quemUid', 'quemNome', 'quemChave', 'quemRole', 'createdAt'])
+        && request.resource.data.tipo is string && request.resource.data.acao is string
+        && request.resource.data.quemRole == (isDono() ? 'dono' : staffRole());
+    }
+
+    // ---------- tickets ----------
+    match /tickets/{tid} {
+      allow read: if signed() && (resource.data.uid == request.auth.uid || isStaff());
+
+      allow create: if signed() && request.resource.data.uid == request.auth.uid
+                    && request.resource.data.status == 'pendente'
+                    && request.resource.data.keys().hasOnly(['uid', 'userName', 'userEmail', 'userPhoto', 'discordId', 'product', 'productName', 'price', 'status', 'createdAt', 'updatedAt'])
+                    && produtoOk(request.resource.data)
+                    && request.resource.data.userEmail == emailDaConta()
+                    && request.resource.data.createdAt == request.time;
+
+      allow update: if signed() && (
+        isDono()
+        // vendedor: muda entre pendente e concluído, mas nunca mexe num ticket já reembolsado
+        || (isVendedor()
+            && resource.data.status != 'reembolsado'
+            && request.resource.data.status in ['pendente', 'concluido']
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt']))
+        // qualquer membro da equipe: só "toca" o ticket ao responder
+        || (isStaff() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['updatedAt']))
+        // cliente: só o próprio nome/foto e a data (nunca o status)
+        || (resource.data.uid == request.auth.uid
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['updatedAt', 'userName', 'userPhoto']))
+      );
+
+      allow delete: if signed() && (resource.data.uid == request.auth.uid || isDono());   // exclusão de conta (LGPD)
+
+      // ---------- mensagens ----------
+      match /messages/{mid} {
+        function donoDoTicket() { return get(/databases/$(database)/documents/tickets/$(tid)).data.uid == request.auth.uid; }
+
+        allow read: if signed() && (donoDoTicket() || isStaff());
+
+        allow create: if signed() && request.resource.data.uid == request.auth.uid && mensagemOk(request.resource.data) && (
+          // cliente escrevendo no próprio ticket
+          (donoDoTicket() && request.resource.data.isAdmin == false)
+          // equipe respondendo, com o cargo REAL (ninguém se passa por DONO)
+          || (isStaff() && request.resource.data.isAdmin == true
+              && request.resource.data.get('role', 'dono') == (isDono() ? 'dono' : staffRole()))
+        );
+
+        allow update: if false;
+        allow delete: if signed() && (donoDoTicket() || isDono());
+      }
+    }
+
+    // ---------- suporte (chamados de ajuda) ----------
+    // status: aberto -> em_andamento -> aguardando_cliente -> resolvido (e o cliente pode reabrir)
+    match /suporte/{sid} {
+      function statusSup() { return ['aberto', 'em_andamento', 'aguardando_cliente', 'resolvido']; }
+
+      allow read: if signed() && (resource.data.uid == request.auth.uid || isStaff());
+
+      // cliente abre o chamado; o pedido vinculado (se houver) TEM que ser dele
+      allow create: if signed() && request.resource.data.uid == request.auth.uid
+        && request.resource.data.status == 'aberto'
+        && request.resource.data.keys().hasOnly(['uid', 'userName', 'userEmail', 'userPhoto', 'discordId', 'assunto', 'categoria', 'prioridade',
+             'pedidoId', 'pedidoNome', 'status', 'assumidoPor', 'assumidoUid', 'resolvedAt', 'createdAt', 'updatedAt'])
+        && request.resource.data.assunto is string && request.resource.data.assunto.size() >= 3 && request.resource.data.assunto.size() <= 120
+        && request.resource.data.categoria in ['compra', 'acesso', 'tecnico', 'pagamento', 'conta', 'outro']
+        && request.resource.data.prioridade in ['normal', 'alta']
+        && request.resource.data.userEmail == emailDaConta()
+        && request.resource.data.createdAt == request.time
+        && (request.resource.data.pedidoId == null
+            || get(/databases/$(database)/documents/tickets/$(request.resource.data.pedidoId)).data.uid == request.auth.uid);
+
+      allow update: if signed() && (
+        // equipe (dono, vendedor, suporte): status, responsável e data
+        (isStaff()
+          && request.resource.data.status in statusSup()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt', 'assumidoPor', 'assumidoUid', 'resolvedAt']))
+        // cliente: só as transições dele (responder, resolver, reabrir) + nome/foto
+        || (resource.data.uid == request.auth.uid
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt', 'userName', 'userPhoto', 'resolvedAt'])
+            && (request.resource.data.status == resource.data.status
+                || (resource.data.status == 'aguardando_cliente' && request.resource.data.status == 'em_andamento')
+                || (resource.data.status == 'resolvido' && request.resource.data.status in ['aberto', 'em_andamento'])
+                || (resource.data.status != 'resolvido' && request.resource.data.status == 'resolvido')))
+      );
+
+      allow delete: if signed() && (resource.data.uid == request.auth.uid || isDono());   // exclusão de conta (LGPD)
+
+      match /messages/{mid} {
+        function donoDoChamado() { return get(/databases/$(database)/documents/suporte/$(sid)).data.uid == request.auth.uid; }
+
+        allow read: if signed() && (donoDoChamado() || isStaff());
+
+        allow create: if signed() && request.resource.data.uid == request.auth.uid && mensagemOk(request.resource.data) && (
+          (donoDoChamado() && request.resource.data.isAdmin == false)
+          || (isStaff() && request.resource.data.isAdmin == true
+              && request.resource.data.get('role', 'dono') == (isDono() ? 'dono' : staffRole()))
+        );
+
+        allow update: if false;
+        allow delete: if signed() && (donoDoChamado() || isDono());
+      }
+    }
+  }
+}

@@ -1,0 +1,15 @@
+# ============================================================
+#  Nx7 — cabeçalhos de segurança (Netlify)
+#  Coloque este arquivo na RAIZ do site (ao lado do index.html), com o nome exato "_headers".
+#  Se algo do site parar de carregar depois de publicar, abra o Console do navegador (F12):
+#  a mensagem "Refused to ... Content Security Policy" diz qual domínio falta liberar.
+# ============================================================
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self' https://www.gstatic.com https://apis.google.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https://*.googleusercontent.com https://cdn.discordapp.com https://res.cloudinary.com https://azwvqmyveyegebeamrva.supabase.co https://firebasestorage.googleapis.com; connect-src 'self' https://*.googleapis.com https://*.firebaseio.com https://nx7-site.firebaseapp.com https://azwvqmyveyegebeamrva.supabase.co https://api.cloudinary.com https://notift-discord.thiagocoelhodavos.workers.dev https://discord-roles.thiagocoelhodavos.workers.dev https://discord-logs.thiagocoelhodavos.workers.dev; frame-src https://nx7-site.firebaseapp.com https://accounts.google.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=()
+  Strict-Transport-Security: max-age=31536000; includeSubDomains
+  # same-origin-allow-popups: mantém o login por pop-up (Google/Discord) funcionando
+  Cross-Origin-Opener-Policy: same-origin-allow-popups

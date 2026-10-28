@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://nx7painel.netlify.app/sitemap.xml
